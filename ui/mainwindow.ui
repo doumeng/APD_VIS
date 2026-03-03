@@ -437,9 +437,226 @@
            </attribute>
            <layout class="QVBoxLayout" name="verticalLayout_algo">
             <item>
-             <widget class="QCheckBox" name="chk_denoise">
+             <widget class="QGroupBox" name="grp_denoise">
+              <property name="title">
+               <string>降噪算法 (Denoising)</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_2">
+               <item>
+                <widget class="QCheckBox" name="chk_dbscan">
+                 <property name="text">
+                  <string>DBSCAN 离群点去除 (Open3D)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout">
+                 <item>
+                  <widget class="QLabel" name="label">
+                   <property name="text">
+                    <string>半径 (Epsilon):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_dbscan_eps">
+                   <property name="decimals">
+                    <number>2</number>
+                   </property>
+                   <property name="singleStep">
+                    <double>0.010000000000000</double>
+                   </property>
+                   <property name="value">
+                    <double>0.050000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_2">
+                 <item>
+                  <widget class="QLabel" name="label_2">
+                   <property name="text">
+                    <string>最小点数 (Min Points):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_dbscan_min_points">
+                   <property name="value">
+                    <number>10</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="Line" name="line">
+                 <property name="orientation">
+                  <enum>Qt::Horizontal</enum>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QCheckBox" name="chk_range_gate">
+                 <property name="text">
+                  <string>距离选通 (Range Gating)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_3">
+                 <item>
+                  <widget class="QLabel" name="label_3">
+                   <property name="text">
+                    <string>范围 (Min-Max):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_range_min">
+                   <property name="maximum">
+                    <double>10000.000000000000000</double>
+                   </property>
+                   <property name="value">
+                    <double>0.100000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_4">
+                   <property name="text">
+                    <string>-</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_range_max">
+                   <property name="maximum">
+                    <double>10000.000000000000000</double>
+                   </property>
+                   <property name="value">
+                    <double>10.000000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="Line" name="line_2">
+                 <property name="orientation">
+                  <enum>Qt::Horizontal</enum>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QCheckBox" name="chk_intensity_filter">
+                 <property name="text">
+                  <string>强度过滤 (Intensity Filter)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_4">
+                 <item>
+                  <widget class="QLabel" name="label_5">
+                   <property name="text">
+                    <string>最小强度:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_min_intensity">
+                   <property name="maximum">
+                    <double>65535.000000000000000</double>
+                   </property>
+                   <property name="value">
+                    <double>10.000000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_completion">
+              <property name="title">
+               <string>补全算法 (Completion)</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_3">
+               <item>
+                <widget class="QRadioButton" name="rb_comp_none">
+                 <property name="text">
+                  <string>不补全 (None)</string>
+                 </property>
+                 <property name="checked">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_comp_conn">
+                 <property name="text">
+                  <string>基于连通域 (Connected Components)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_5">
+                 <item>
+                  <widget class="QLabel" name="label_6">
+                   <property name="text">
+                    <string>最大孔洞 (Max Hole Size):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_hole_size">
+                   <property name="value">
+                    <number>50</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_comp_morph">
+                 <property name="text">
+                  <string>基于形态学 (Morphological)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_6">
+                 <item>
+                  <widget class="QLabel" name="label_7">
+                   <property name="text">
+                    <string>核大小 (Kernel Size):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_morph_kernel">
+                   <property name="value">
+                    <number>3</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QCheckBox" name="chk_apply_realtime">
               <property name="text">
-               <string>启用实时去噪</string>
+               <string>实时应用 (Apply to Real-time Display)</string>
+              </property>
+              <property name="checked">
+               <bool>true</bool>
               </property>
              </widget>
             </item>
@@ -464,35 +681,156 @@
            </attribute>
            <layout class="QVBoxLayout" name="verticalLayout_offline">
             <item>
-             <layout class="QHBoxLayout" name="horizontalLayout_algo">
-              <item>
-               <widget class="QLabel" name="label_algo">
-                <property name="text">
-                 <string>重建算法:</string>
-                </property>
-               </widget>
-              </item>
-              <item>
-               <widget class="QComboBox" name="cmb_algo">
-                <item>
+             <widget class="QGroupBox" name="grp_offline_algo">
+              <property name="title">
+               <string>重建算法 (Reconstruction)</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_4">
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_spatial">
+                 <item>
+                  <widget class="QCheckBox" name="chk_spatial_corr">
+                   <property name="text">
+                    <string>空间相关 (Spatial Correlation)</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <spacer name="horizontalSpacer_spatial">
+                   <property name="orientation">
+                    <enum>Qt::Horizontal</enum>
+                   </property>
+                   <property name="sizeHint" stdset="0">
+                    <size>
+                     <width>20</width>
+                     <height>20</height>
+                    </size>
+                   </property>
+                  </spacer>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_spatial_kernel">
+                   <property name="text">
+                    <string>邻域 (Kernel):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_spatial_kernel">
+                   <property name="minimum">
+                    <number>1</number>
+                   </property>
+                   <property name="singleStep">
+                    <number>2</number>
+                   </property>
+                   <property name="value">
+                    <number>3</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_offline_peak">
                  <property name="text">
                   <string>峰值法 (Peak Detection)</string>
                  </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>匹配滤波 (Matched Filter)</string>
+                 <property name="checked">
+                  <bool>true</bool>
                  </property>
-                </item>
-               </widget>
-              </item>
-             </layout>
-            </item>
-            <item>
-             <widget class="QCheckBox" name="chk_spatial_corr">
-              <property name="text">
-               <string>启用空间相关 (3x3 邻域合并)</string>
-              </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_offline_matched">
+                 <property name="text">
+                  <string>匹配滤波法 (Matched Filter)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_7">
+                 <item>
+                  <spacer name="horizontalSpacer_2">
+                   <property name="orientation">
+                    <enum>Qt::Horizontal</enum>
+                   </property>
+                   <property name="sizeHint" stdset="0">
+                    <size>
+                     <width>20</width>
+                     <height>20</height>
+                    </size>
+                   </property>
+                  </spacer>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_8">
+                   <property name="text">
+                    <string>激光脉宽 (Pulse Width):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_matched_width">
+                   <property name="value">
+                    <number>10</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_offline_derivative">
+                 <property name="text">
+                  <string>导数法 (Derivative)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_8">
+                 <item>
+                  <spacer name="horizontalSpacer_3">
+                   <property name="orientation">
+                    <enum>Qt::Horizontal</enum>
+                   </property>
+                   <property name="sizeHint" stdset="0">
+                    <size>
+                     <width>20</width>
+                     <height>20</height>
+                    </size>
+                   </property>
+                  </spacer>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_9">
+                   <property name="text">
+                    <string>步长 (Step):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_deriv_step">
+                   <property name="value">
+                    <number>1</number>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_10">
+                   <property name="text">
+                    <string>阈值 (Threshold):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_deriv_thresh">
+                   <property name="value">
+                    <double>1.000000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+              </layout>
              </widget>
             </item>
             <item>
@@ -508,7 +846,7 @@
             <item>
              <widget class="QPushButton" name="btn_reconstruct">
               <property name="text">
-               <string>离线重建...</string>
+               <string>开始离线重建</string>
               </property>
              </widget>
             </item>

@@ -8,12 +8,15 @@ class Reconstructor(QThread):
     sig_progress = pyqtSignal(int)
     sig_finished = pyqtSignal(object, object) # intensity, range
     sig_error = pyqtSignal(str)
+    sig_global_hist = pyqtSignal(object, object) # x_axis, counts
 
-    def __init__(self, filepath, algorithm="peak", use_spatial_corr=False):
+    def __init__(self, filepath, algorithm="peak", use_spatial_corr=False, params=None, max_frames=0):
         super().__init__()
         self.filepath = filepath
         self.algorithm = algorithm
         self.use_spatial_corr = use_spatial_corr
+        self.params = params if params else {}
+        self.max_frames = max_frames
         self.running = True
 
     def run(self):
@@ -26,12 +29,8 @@ class Reconstructor(QThread):
         
         # --- Reconstruction Parameters ---
         width, height = 128, 128
-        tof_max = 16000 # Max ToF value
-        # Using a sparse or dense histogram?
-        # A full 3D array (128x128x16000) is too big (256MB * 2 bytes = 512MB). Feasible but let's be careful.
-        # Alternatively, use a smaller bin size or dynamic accumulation.
-        # For now, let's use a 3D array of uint16 or uint32 to accumulate counts.
-        # 128*128*16000*2 bytes is ~500MB. OK for modern PC.
+        tof_max = 8000 # Max ToF value per user request
+
         try:
             histogram = np.zeros((width, height, tof_max + 1), dtype=np.uint16)
         except MemoryError:
@@ -39,133 +38,179 @@ class Reconstructor(QThread):
              return
 
         try:
-            with open(self.filepath, 'rb') as f:
-                while self.running and f.tell() < file_size:
-                    # Sync to header
-                    header = f.read(2)
-                    if not header: break
-                    if header != b'\xaa\x55':
-                        continue # Skip bytes until sync
+            raw_data = np.fromfile(self.filepath, dtype='<H') # Little-endian uint16
+            
+            total_pixels_per_frame = width * height
+            if raw_data.size % total_pixels_per_frame != 0:
+                # Handle incomplete frames
+                valid_len = (raw_data.size // total_pixels_per_frame) * total_pixels_per_frame
+                raw_data = raw_data[:valid_len]
+            
+            frames = raw_data.reshape(-1, width, height)
+            num_frames = frames.shape[0]
+            
+            if num_frames == 0:
+                self.sig_error.emit("文件中没有完整帧数据")
+                return
+
+            # Apply Frame Limit
+            if self.max_frames > 0 and num_frames > self.max_frames:
+                frames = frames[:self.max_frames]
+                num_frames = self.max_frames
+
+            # 2. Accumulate Histogram & Global Histogram
+            global_hist_counts = np.zeros(tof_max + 1, dtype=np.int64)
+            
+            for x in range(width):
+                if not self.running: break
+                
+                # Emit progress (0-60%)
+                progress = int((x / width) * 60)
+                self.sig_progress.emit(progress)
+                
+                for y in range(height):
+                    pixel_vals = frames[:, x, y]
                     
-                    header_rest = f.read(7)
-                    if len(header_rest) < 7: break
+                    # Filter invalid values
+                    mask = pixel_vals <= tof_max
+                    valid_vals = pixel_vals[mask]
                     
-                    pkt_type = header_rest[5] # Index 5 is the 6th byte of header_rest -> Type
-                    
-                    # Read Data (4096) + FCS (1) + END (2) = 4099 bytes
-                    payload = f.read(4096)
-                    tail = f.read(3) # FCS + END
-                    
-                    if len(payload) < 4096: break
-                    
-                    if pkt_type == 1: # ToF Data
-                        # Payload is 4096 bytes = 2048 uint16 values
-                        # We need to map these to pixel coordinates.
-                        # Assuming sequential filling:
-                        # Frame 0: Px(0,0) to Px(N,M)... 
-                        # But we don't know the exact starting pixel of a packet unless we track it or use SEQ.
-                        # The user said: "Each packet includes multiple frames... each frame includes 16384 ToFs, continuous arrangement".
-                        # Wait, "Each packet includes multiple frames" AND "Each frame includes 16384 ToFs"
-                        # But a packet is only 4096 bytes (2048 ToFs).
-                        # CONTRADICTION: 2048 ToFs < 16384 ToFs. A packet cannot hold a full frame, let alone multiple frames.
-                        # Re-reading user requirement: "每个数据包包括多帧tof数据" (Each packet includes multiple frames of tof data)
-                        # Maybe they meant "The file includes multiple frames"?
-                        # Or maybe the data is compressed?
-                        # Or maybe "Frame" in their context means something smaller?
-                        # Let's assume standard fragmentation based on previous udp.md:
-                        # "D0-12: Length of data in current fragment"
-                        # "Seq: Position in fragment sequence"
+                    if valid_vals.size > 0:
+                        counts = np.bincount(valid_vals, minlength=tof_max + 1)
+                        if len(counts) > tof_max + 1:
+                            counts = counts[:tof_max + 1]
+                        counts = counts.astype(np.int64, copy=False)
                         
-                        # Given the user said "16384 ToFs, continuous arrangement", and we receive a stream of uint16s.
-                        # We should just treat the payload as a stream of ToF values and fill the histogram pixel by pixel, wrapping around 128x128.
-                        
-                        data = np.frombuffer(payload, dtype='>H') # Big-endian uint16 based on prev context (or Little-endian?)
-                        # Assuming Big Endian as per network standard usually, but check udp.md (doesn't specify, usually ARM/x86 is LE).
-                        # Let's try Little Endian first as it's common in PC-based sensors.
-                        data = np.frombuffer(payload, dtype='<H') 
-                        
-                        # Filter valid range
-                        mask = data <= tof_max
-                        valid_data = data[mask]
-                        
-                        # We don't know the pixel coordinates for these ToF values easily without a frame counter or strict sequence.
-                        # Simplification: We just build a GLOBAL histogram for the whole FOV (if we can't spatially resolve)
-                        # OR, more likely: The stream corresponds to pixel 0, 1, 2... 16383, 0, 1...
-                        # Since we are offline reconstructing, we might not need perfect frame sync if we just accumulate statistics.
-                        # BUT, for spatial correlation, we need correct (x,y).
-                        # Let's assume the data stream aligns with pixels.
-                        
-                        # LIMITATION: Without tracking the exact start of a frame in the file, we might be shifted.
-                        # However, usually files start with a complete frame or we just modulo.
-                        # For this task, I will implement the histogram accumulation logic assuming the stream wraps around 128x128 pixels.
-                        
-                        # Since efficient 3D histogramming is hard in Python loop, we optimize:
-                        # We just collect all ToFs.
-                        # Actually, for "Reconstruction", usually we process Frame by Frame.
-                        # But here we want ONE intensity image and ONE range image from the whole file?
-                        # "Offline reconstruction ... from ToF data" implies aggregating many frames to get a good image?
-                        # Or is it playing back? The prompt says "Reconstruction", implying processing raw data to get a result.
-                        # And "Spatial Correlation" implies improving SNR.
-                        # So likely: Accumulate ALL frames in the file into one high-quality histogram per pixel.
-                        
-                        # Implementation:
-                        # Use a global index counter to map stream to (x,y).
-                        # idx = 0...16383
-                        
-                        pass # To be implemented in the loop below
-                        
-                    processed_bytes = f.tell()
-                    if file_size > 0:
-                        progress = int((processed_bytes / file_size) * 100)
-                        self.sig_progress.emit(progress)
+                        histogram[x, y, :] = counts.astype(np.uint16)
+                        global_hist_counts += counts
+
+            # Emit Global Histogram
+            x_axis = np.arange(tof_max + 1)
+            global_hist_counts[:50] = 0
+            global_hist_counts[-50:] = 0
+            self.sig_global_hist.emit(x_axis, global_hist_counts)
             
-            # --- Mocking the Data for now since we can't reliably parse without file sample ---
-            # In a real implementation, I would accumulate `histogram[x, y, tof_value] += 1`
-            # Here I will generate a synthetic histogram to demonstrate the algorithms.
-            
-            # Create a synthetic "Object" at 10m (ToF=6666) with some noise
-            # Shape: Circle in center
-            # Background: Noise
-            
-            # Using the dummy logic but shaped for the algorithms
-            self.sig_progress.emit(90)
-            
-            # Simulate a 128x128 range map and intensity map to generate the histogram from
-            true_range = np.zeros((128, 128))
-            for i in range(128):
-                for j in range(128):
-                    true_range[i, j] = 5000 + 50 * np.sqrt((i-64)**2 + (j-64)**2) # Cones
-            
-            # Apply algorithms
-            # 1. Spatial Correlation (if enabled)
-            # This would operate on the Histogram (3D array).
-            # If enabled, we blur the histogram in X/Y dimensions.
-            # kernel = 3x3 ones.
-            # scipy.ndimage.convolve(histogram, kernel)
-            
-            # 2. Peak Detection / Matched Filter
-            reconstructed_int = np.zeros((128, 128))
-            reconstructed_rng = np.zeros((128, 128))
-            
-            # Simulating results based on "true_range" + noise
-            # If Spatial Correlation is ON, noise is lower.
-            noise_level = 5 if self.use_spatial_corr else 20
-            
-            reconstructed_rng = true_range + np.random.normal(0, noise_level, (128, 128))
-            reconstructed_int = np.ones((128, 128)) * 100 # Uniform intensity
-            
-            # Matched Filter would be cleaner than Peak
-            if self.algorithm == "matched":
-                reconstructed_rng = scipy.ndimage.gaussian_filter(reconstructed_rng, 1) # Smoother
-            
-            # 3. Apply Spatial Correlation (if enabled)
+            # Free frames memory
+            del frames
+            del raw_data
+            import gc
+            gc.collect()
+
+            # 3. Apply Histogram-Level Spatial Correlation
             if self.use_spatial_corr:
-                # In real histogram logic, we would convolve the histogram.
-                # Here, simulating by smoothing the result.
-                # 3x3 box filter
-                kernel = np.ones((3,3)) / 9.0
-                reconstructed_int = scipy.ndimage.convolve(reconstructed_int, kernel)
-                reconstructed_rng = scipy.ndimage.convolve(reconstructed_rng, kernel)
+                self.sig_progress.emit(65)
+                k_size = int(self.params.get('spatial_kernel', 3))
+                if k_size % 2 == 0: k_size += 1
+                
+                # Convert to float32
+                histogram_f = histogram.astype(np.float32)
+                
+                # Apply 2D spatial smoothing on the histogram 3D volume
+                # uniform_filter calculates MEAN. 
+                # To get SUM of neighbors: sum = mean * size
+                scipy.ndimage.uniform_filter(histogram_f, size=(k_size, k_size, 1), output=histogram_f, mode='constant')
+                
+                histogram_f *= (k_size * k_size)
+                
+                histogram = histogram_f
+
+            # --- Processing Algorithms ---
+            self.sig_progress.emit(80)
+            
+            reconstructed_int = np.zeros((width, height), dtype=np.float32)
+            reconstructed_rng = np.zeros((width, height), dtype=np.float32)
+
+            if self.algorithm == "peak":
+                # Peak Detection Implementation
+                # 1. Mask first 50 and last 50 bins
+                # histogram shape: (128, 128, 16001)
+                histogram[:, :, :50] = 0
+                histogram[:, :, -50:] = 0
+                
+                # 2. Find max count and index
+                # max count = intensity
+                # index of max count = ToF
+                
+                # argmax along the ToF axis (axis 2)
+                max_indices = np.argmax(histogram, axis=2) # Shape (128, 128)
+                max_counts = np.max(histogram, axis=2)     # Shape (128, 128)
+                
+                reconstructed_int = max_counts.astype(np.float32)
+                tof_map = max_indices.astype(np.float32)
+                
+                # 3. Convert ToF to Distance
+                # Formula: (16000 - 2 * tof) * 0.15
+                reconstructed_rng = (16000 - 2 * tof_map) * 0.15
+                
+                # Handle invalid data
+                invalid_mask = (max_counts == 0)
+                reconstructed_rng[invalid_mask] = 0
+            
+            elif self.algorithm == "matched":
+                # Matched Filter (Laser Pulse Width)
+                # Convolve histogram with a Gaussian kernel corresponding to pulse width
+                pulse_width = float(self.params.get('pulse_width', 10))
+                
+                # Generate Gaussian kernel
+                # Assume pulse_width is FWHM or similar. 
+                # Sigma = width / 2.355 roughly, or just use width as parameter control.
+                # Let's use sigma = pulse_width / 2 for reasonable smoothing.
+                sigma = max(0.5, pulse_width / 2.0)
+                k_len = int(6 * sigma) + 1
+                if k_len < 3: k_len = 3
+                
+                x = np.arange(k_len) - (k_len - 1) / 2
+                kernel = np.exp(-0.5 * (x / sigma)**2)
+                kernel /= kernel.sum() # Normalize
+                
+                # Convolve along time axis (axis 2)
+                # usage of convolve1d is efficient
+                histogram = scipy.ndimage.convolve1d(histogram, kernel, axis=2)
+                
+                # Then apply Peak Detection on the smoothed histogram
+                histogram[:, :, :50] = 0
+                histogram[:, :, -50:] = 0
+                
+                max_indices = np.argmax(histogram, axis=2)
+                max_counts = np.max(histogram, axis=2)
+                
+                reconstructed_int = max_counts.astype(np.float32)
+                tof_map = max_indices.astype(np.float32)
+                reconstructed_rng = (16000 - 2 * tof_map) * 0.15
+                
+                invalid_mask = (max_counts == 0)
+                reconstructed_rng[invalid_mask] = 0
+                
+            elif self.algorithm == "derivative":
+                # Derivative method (Step and Threshold)
+                step = int(self.params.get('step', 1))
+                if step < 1: step = 1
+                threshold = float(self.params.get('threshold', 0))
+                
+                h_start = histogram[:, :, :-step].astype(np.int32)
+                h_end = histogram[:, :, step:].astype(np.int32)
+                diff = h_end - h_start
+                
+                if diff.shape[2] > 100:
+                    diff[:, :, :50] = 0
+                    diff[:, :, -50:] = 0
+                
+                # Find max derivative (steepest rising edge)
+                max_indices = np.argmax(diff, axis=2)
+                max_vals = np.max(diff, axis=2)
+                
+                # Apply threshold
+                # If max derivative < threshold, signal is invalid
+                valid_mask = max_vals >= threshold
+                
+                reconstructed_int = max_vals.astype(np.float32)
+                tof_map = max_indices.astype(np.float32)
+                
+                reconstructed_rng = (16000 - 2 * tof_map) * 0.15
+                
+                # Zeros where invalid
+                reconstructed_rng[~valid_mask] = 0
+                reconstructed_int[~valid_mask] = 0
             
             self.sig_finished.emit(reconstructed_int, reconstructed_rng)
             

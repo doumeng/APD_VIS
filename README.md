@@ -1,39 +1,155 @@
-# Project Upload Instructions
+# 单光子激光雷达上位机 v3
 
-This project is intended to be hosted on GitHub. However, Git was not found in the environment, so the upload process could not be automated.
+基于 **PyQt5 + PyQtGraph** 的 Windows 上位机，用于接收、显示、录制、回放单光子激光雷达 UDP 数据，并提供强大的离线数据重建分析功能。
 
-## Prerequisites
+主要能力：
 
-1.  **Install Git**: Download and install Git from [git-scm.com](https://git-scm.com/downloads).
-2.  **Install GitHub CLI (Optional but recommended)**: Download from [cli.github.com](https://cli.github.com/).
+- **实时接收**：UDP 分片组帧，支持强度/距离（Type 0）和 ToF（Type 1）数据。
+- **实时显示**：
+    - 强度图（灰度）、距离图（伪彩）、ToF 图（伪彩）。
+    - 实时直方图统计与 FPS 监控。
+- **数据录制**：原始 Payload 录制为 `.bin` 文件（纯净数据流）。
+- **离线回放**：支持 `.bin` 文件回放，自动识别数据类型。
+- **离线重建**：
+    - 针对 ToF 数据的深度重建。
+    - 支持多种算法（峰值法、匹配滤波、导数法）。
+    - 支持空间相关滤波与全局直方图分析。
 
-## Steps to Upload
+---
 
-### Option 1: Use Git (Recommended)
+## 1. 运行环境
 
-1.  Open a terminal in this directory: `D:\code\上位机\预处理板显示上位机\v3`
-2.  Initialize the repository:
-    ```bash
-    git init
-    ```
-3.  Add files and commit:
-    ```bash
-    git add .
-    git commit -m "Initial commit"
-    ```
-4.  Create a new repository on GitHub (if using GitHub CLI):
-    ```bash
-    gh repo create my-project-name --public --source=. --remote=origin
-    ```
-    Or manually create a repository on GitHub website and add remote:
-    ```bash
-    git remote add origin https://github.com/USERNAME/REPOSITORY.git
-    ```
-5.  Push the code:
-    ```bash
-    git push -u origin main
-    ```
+- OS：Windows 10/11
+- Python：3.8+（推荐 3.9/3.10）
 
-### Option 2: Download ZIP (Alternative)
+安装依赖：
 
-If you cannot install Git, download the generated **project.zip** file from this directory and upload it manually to GitHub via the web interface (drag and drop or "Upload files").
+```bash
+pip install -r requirements.txt
+```
+
+核心依赖列表：
+- PyQt5
+- pyqtgraph
+- numpy
+- scipy
+
+---
+
+## 2. 快速开始
+
+### 2.1 启动主程序
+
+```bash
+python main.py
+```
+
+默认监听配置（见 `config.py`）：
+- IP：`127.0.0.1`
+- Port：`5005`
+
+### 2.2 启动模拟器（联调测试）
+
+强度/距离数据模拟：
+```bash
+python utils/start_intensity_simulator.py
+```
+
+ToF 数据模拟：
+```bash
+python utils/start_tof_simulator.py
+```
+
+> **提示**：先启动主程序并点击“连接”，再启动模拟器发送数据。
+
+---
+
+## 3. 功能详解
+
+### 3.1 实时监控
+- **多视图显示**：左侧 Tab 页切换查看强度/距离或 ToF 图像。
+- **交互操作**：
+    - 鼠标点击图像可查看像素坐标及数值。
+    - 侧边栏支持手动调整数值映射范围 (Min/Max)。
+- **状态监控**：实时 FPS、网络连接状态。
+
+### 3.2 数据录制
+- 点击“开始录制”后，程序自动将接收到的有效载荷（Payload）写入文件。
+- **文件命名**：
+    - 强度/距离数据：`depth_YYYYMMDD_HHMMSS.bin`
+    - ToF 数据：`tof_YYYYMMDD_HHMMSS.bin`
+- **录制策略**：首帧锁定类型，后续不同类型数据将被丢弃，确保文件纯净。
+
+### 3.3 数据回放
+- 支持加载 `.bin` 录制文件。
+- **智能识别**：根据文件名前缀（`depth_` 或 `tof_`）自动解析帧大小。
+- **回放控制**：播放、暂停、进度条拖动。回放时自动暂停网络接收。
+
+### 3.4 离线重建 (Offline Reconstruction)
+专为 ToF 数据设计的高级分析模块，支持从 `.bin` 文件重建深度图像。
+
+**核心功能**：
+- **帧数限制**：可设置最大重建帧数（0 表示处理全部数据），便于快速预览。
+- **全局直方图**：重建过程中统计全图所有像素的光子分布，绘制全局 ToF 直方图。
+- **空间滤波 (Spatial Correlation)**：
+    - **预处理机制**：在重建前对直方图进行 3x3（或自定义大小）邻域平滑。
+    - 有效提升弱信号下的信噪比。
+
+**支持算法**：
+1. **峰值法 (Peak Detection)**：
+   - 统计直方图 -> 去除首尾噪声区间 -> 寻找最大值下标。
+   - 经典且快速的 ToF 提取方法。
+2. **匹配滤波 (Matched Filter)**：
+   - 模拟激光脉宽（高斯核）与直方图进行卷积互相关。
+   - 适用于低信噪比环境。
+3. **导数法 (Derivative)**：
+   - 计算直方图一阶差分，寻找最大上升沿。
+   - 支持设置步长（Step）与阈值（Threshold）以过滤噪声。
+
+---
+
+## 4. 项目结构
+
+```text
+v3/
+├─ main.py                     # 程序入口，UI 逻辑控制
+├─ config.py                   # 全局配置参数
+├─ requirements.txt            # 依赖清单
+├─ README.md                   # 项目文档
+├─ design.md                   # 设计文档
+├─ plan.md                     # 开发计划与进度
+├─ core/
+│  ├─ receiver.py              # UDP 接收线程
+│  ├─ parser.py                # 数据包解析
+│  ├─ recorder.py              # 数据录制
+│  ├─ playback.py              # 数据回放
+│  ├─ reconstructor.py         # 离线重建核心逻辑（含算法实现）
+│  └─ processor.py             # 图像后处理（去噪、补洞）
+├─ ui/
+│  └─ mainwindow.ui            # Qt Designer 界面文件
+└─ utils/
+   ├─ theme.py                 # 深色主题样式
+   ├─ simulator.py             # 模拟器基类
+   └─ start_*.py               # 启动脚本
+```
+
+---
+
+## 5. 开发说明
+
+- **UI 修改**：请使用 Qt Designer 编辑 `ui/mainwindow.ui`，程序运行时通过 `uic.loadUi` 动态加载，**切勿**手动转换为 Python 代码。
+- **算法扩展**：在 `core/reconstructor.py` 中添加新的算法分支即可扩展重建功能。
+- **坐标系**：PyQtGraph 的 `ImageItem` 默认转置显示，代码中通常使用 `.T` 进行坐标对齐。
+
+---
+
+## 6. 常见问题
+
+**Q: 离线重建时内存占用过高？**
+A: 重建过程需要构建完整的直方图立方体 `(128, 128, 16000)`，约占用 500MB 内存。如果启用空间滤波，会有额外的临时内存开销。建议在 8GB+ 内存机器上运行。
+
+**Q: 回放时提示文件类型错误？**
+A: 请确保录制文件名包含 `depth_` 或 `tof_` 前缀，程序依赖文件名前缀区分数据格式（64KB/帧 或 32KB/帧）。
+
+**Q: 为什么重建出的距离全是 0？**
+A: 可能是算法参数设置不当（如导数法阈值过高），或者数据本身没有明显的回波峰值。尝试开启“空间滤波”或改用“峰值法”。
