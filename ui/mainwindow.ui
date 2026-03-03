@@ -1,0 +1,553 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1800</width>
+    <height>900</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>单光子激光雷达上位机 v3.0</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QHBoxLayout" name="horizontalLayout_main">
+    <item>
+     <widget class="QSplitter" name="splitter">
+      <property name="orientation">
+       <enum>Qt::Horizontal</enum>
+      </property>
+      <widget class="QTabWidget" name="tabWidget_display">
+       <property name="currentIndex">
+        <number>0</number>
+       </property>
+       <widget class="QWidget" name="tab_int_rng">
+        <attribute name="title">
+         <string>实时监控 (强度/距离)</string>
+        </attribute>
+        <layout class="QGridLayout" name="gridLayout_tab1">
+         <item row="0" column="0">
+          <widget class="QGroupBox" name="grp_int">
+           <property name="title">
+            <string>强度图像 (Intensity)</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_int">
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_int_ctrl">
+              <item>
+               <widget class="QLabel" name="label_int_range">
+                <property name="text">
+                 <string>Range:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_int_min">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_int_sep">
+                <property name="text">
+                 <string>-</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_int_max">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+                <property name="value">
+                 <number>255</number>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="GraphicsLayoutWidget" name="glw_int"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="QGroupBox" name="grp_rng">
+           <property name="title">
+            <string>距离图像 (Range)</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_rng">
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_rng_ctrl">
+              <item>
+               <widget class="QLabel" name="label_rng_range">
+                <property name="text">
+                 <string>Range:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_rng_min">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_rng_sep">
+                <property name="text">
+                 <string>-</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_rng_max">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+                <property name="value">
+                 <number>255</number>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="GraphicsLayoutWidget" name="glw_rng"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QGroupBox" name="grp_hist_int">
+           <property name="maximumSize">
+            <size>
+             <width>16777215</width>
+             <height>250</height>
+            </size>
+           </property>
+           <property name="title">
+            <string>强度分布直方图</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_hist_int">
+            <item>
+             <widget class="PlotWidget" name="plot_hist_int"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="QGroupBox" name="grp_hist_rng">
+           <property name="maximumSize">
+            <size>
+             <width>16777215</width>
+             <height>250</height>
+            </size>
+           </property>
+           <property name="title">
+            <string>距离分布直方图</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_hist_rng">
+            <item>
+             <widget class="PlotWidget" name="plot_hist_rng"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+       <widget class="QWidget" name="tab_tof">
+        <attribute name="title">
+         <string>光子飞行时间 (ToF)</string>
+        </attribute>
+        <layout class="QVBoxLayout" name="verticalLayout_tab2">
+         <item>
+          <widget class="QGroupBox" name="grp_tof">
+           <property name="title">
+            <string>ToF 图像</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_tof">
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_tof_ctrl">
+              <item>
+               <widget class="QLabel" name="label_tof_range">
+                <property name="text">
+                 <string>Range:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_tof_min">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_tof_sep">
+                <property name="text">
+                 <string>-</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_tof_max">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+                <property name="value">
+                 <number>255</number>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="GraphicsLayoutWidget" name="glw_tof"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item>
+          <widget class="QGroupBox" name="grp_hist_tof">
+           <property name="maximumSize">
+            <size>
+             <width>16777215</width>
+             <height>250</height>
+            </size>
+           </property>
+           <property name="title">
+            <string>ToF 统计直方图</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_hist_tof">
+            <item>
+             <widget class="PlotWidget" name="plot_hist_tof"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </widget>
+      <widget class="QWidget" name="widget_config_container">
+       <layout class="QVBoxLayout" name="verticalLayout_config_container">
+        <item>
+         <widget class="QTabWidget" name="tabWidget_config">
+          <property name="currentIndex">
+           <number>0</number>
+          </property>
+          <widget class="QWidget" name="tab_basic_config">
+           <attribute name="title">
+            <string>基础配置</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_basic_config">
+            <item>
+             <widget class="QGroupBox" name="grp_net">
+              <property name="title">
+               <string>网络配置</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_net">
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_ip">
+                 <item>
+                  <widget class="QLabel" name="label_ip">
+                   <property name="text">
+                    <string>IP:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QLineEdit" name="txt_ip">
+                   <property name="text">
+                    <string>0.0.0.0</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_port">
+                 <item>
+                  <widget class="QLabel" name="label_port">
+                   <property name="text">
+                    <string>Port:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_port">
+                   <property name="minimum">
+                    <number>1024</number>
+                   </property>
+                   <property name="maximum">
+                    <number>65535</number>
+                   </property>
+                   <property name="value">
+                    <number>10000</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QPushButton" name="btn_conn">
+                 <property name="text">
+                  <string>连接</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_rec">
+              <property name="title">
+               <string>数据录制</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_rec">
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_rec_path">
+                 <item>
+                  <widget class="QLineEdit" name="txt_rec_path">
+                   <property name="readOnly">
+                    <bool>true</bool>
+                   </property>
+                   <property name="placeholderText">
+                    <string>默认保存路径 (当前目录)</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QPushButton" name="btn_set_rec_path">
+                   <property name="maximumSize">
+                    <size>
+                     <width>30</width>
+                     <height>16777215</height>
+                    </size>
+                   </property>
+                   <property name="text">
+                    <string>...</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="lbl_rec_status">
+                 <property name="text">
+                  <string>状态: 空闲</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QPushButton" name="btn_rec">
+                 <property name="text">
+                  <string>开始录制</string>
+                 </property>
+                 <property name="checkable">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_play">
+              <property name="title">
+               <string>数据回放</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_play">
+               <item>
+                <widget class="QPushButton" name="btn_load">
+                 <property name="text">
+                  <string>加载文件...</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_play_ctrl">
+                 <item>
+                  <widget class="QPushButton" name="btn_play">
+                   <property name="enabled">
+                    <bool>false</bool>
+                   </property>
+                   <property name="text">
+                    <string>播放/暂停</string>
+                   </property>
+                   <property name="checkable">
+                    <bool>true</bool>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="lbl_play_status">
+                 <property name="text">
+                  <string>未加载文件</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_info">
+              <property name="title">
+               <string>像素信息</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_info">
+               <item>
+                <widget class="QLabel" name="lbl_pixel_info">
+                 <property name="text">
+                  <string>点击图像获取信息</string>
+                 </property>
+                 <property name="wordWrap">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <spacer name="verticalSpacer">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>40</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_algo">
+           <attribute name="title">
+            <string>算法设置</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_algo">
+            <item>
+             <widget class="QCheckBox" name="chk_denoise">
+              <property name="text">
+               <string>启用实时去噪</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="verticalSpacer_2">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>40</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_offline">
+           <attribute name="title">
+            <string>离线分析</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_offline">
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_algo">
+              <item>
+               <widget class="QLabel" name="label_algo">
+                <property name="text">
+                 <string>重建算法:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="cmb_algo">
+                <item>
+                 <property name="text">
+                  <string>峰值法 (Peak Detection)</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>匹配滤波 (Matched Filter)</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QCheckBox" name="chk_spatial_corr">
+              <property name="text">
+               <string>启用空间相关 (3x3 邻域合并)</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QProgressBar" name="progress_reconstruct">
+              <property name="value">
+               <number>0</number>
+              </property>
+              <property name="textVisible">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="btn_reconstruct">
+              <property name="text">
+               <string>离线重建...</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="verticalSpacer_3">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>40</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </widget>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>GraphicsLayoutWidget</class>
+   <extends>QGraphicsView</extends>
+   <header>pyqtgraph</header>
+  </customwidget>
+  <customwidget>
+   <class>PlotWidget</class>
+   <extends>QGraphicsView</extends>
+   <header>pyqtgraph</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
