@@ -19,6 +19,7 @@ from core.playback import PlaybackManager
 from core.reconstructor import Reconstructor
 from core.processor import ImageProcessor
 from utils.theme import apply_dark_theme
+from utils.colormaps import get_colormap
 import config
 
 # =============================================================================
@@ -37,6 +38,10 @@ class MainWindow(QMainWindow):
         self.recorder = DataRecorder()
         self.playback = PlaybackManager()
         self.processor = ImageProcessor()
+        
+        # Store Raw Reconstructed Data for reprocessing
+        self.raw_recon_int = None
+        self.raw_recon_rng = None
         
         self.recorder.start() # Start recorder thread
         self.receiving = False
@@ -303,6 +308,10 @@ class MainWindow(QMainWindow):
             'enabled': self.chk_apply_realtime.isChecked()
         }
         self.processor.update_settings(settings)
+        
+        # If not streaming and not playing back, update the offline display immediately
+        if not self.receiving and not self.playback.file_handle:
+            self.update_offline_display()
 
     def setup_image_view(self, glw, sb_min, sb_max, cmap_name=None):
         # glw is GraphicsLayoutWidget
@@ -311,26 +320,48 @@ class MainWindow(QMainWindow):
         img = pg.ImageItem()
         vb.addItem(img)
         
-        # Set Colormap
-        if cmap_name:
-            # pg.colormap.get returns a ColorMap object
-            # We can use it to get a lookup table
-            cmap = pg.colormap.get(cmap_name)
-            img.setLookupTable(cmap.getLookupTable())
-
         # Add FPS Text Item
         txt_fps = pg.TextItem(text="FPS: 0.0", color='w', anchor=(0, 0))
         txt_fps.setPos(0, 0) # Top-left of the image (0,0)
         vb.addItem(txt_fps)
         
+        # Add Colorbar (HistogramLUTItem)
+        hist = pg.HistogramLUTItem()
+        hist.setImageItem(img)
+        glw.addItem(hist)
+        
+        # Set Colormap (Managed by HistogramLUTItem now)
+        if cmap_name:
+            try:
+                cmap_obj = get_colormap(cmap_name)
+                hist.gradient.setColorMap(cmap_obj)
+            except Exception as e:
+                print(f"Error loading colormap {cmap_name}: {e}")
+        
         glw.img_item = img # Attach to widget for easy access if needed, or just return it
         
-        # Connect SpinBoxes
-        sb_min.valueChanged.connect(lambda v: self.update_img_levels(img, v, sb_max.value()))
-        sb_max.valueChanged.connect(lambda v: self.update_img_levels(img, sb_min.value(), v))
+        # Connect SpinBoxes to Image Levels
+        # When SpinBox changes -> Update Image Levels (Histogram will update automatically)
+        sb_min.valueChanged.connect(lambda v: img.setLevels([v, sb_max.value()]))
+        sb_max.valueChanged.connect(lambda v: img.setLevels([sb_min.value(), v]))
         
-        # Apply initial levels immediately
-        self.update_img_levels(img, sb_min.value(), sb_max.value())
+        # When Histogram/Image changes -> Update SpinBoxes
+        # Use a flag to prevent recursion if needed, but simple update might be fine
+        def on_levels_changed(*args):
+            # Get levels from image
+            min_v, max_v = img.getLevels()
+            # Block signals to prevent feedback loop
+            sb_min.blockSignals(True)
+            sb_max.blockSignals(True)
+            sb_min.setValue(int(min_v))
+            sb_max.setValue(int(max_v))
+            sb_min.blockSignals(False)
+            sb_max.blockSignals(False)
+            
+        hist.sigLevelsChanged.connect(on_levels_changed)
+        
+        # Apply initial levels from SpinBoxes
+        img.setLevels([sb_min.value(), sb_max.value()])
         
         return img, txt_fps
 
@@ -348,36 +379,6 @@ class MainWindow(QMainWindow):
             self.lbl_pixel_info.setText(f"【{label}】\n坐标: ({x}, {y})\n数值: {val}")
         else:
             self.lbl_pixel_info.setText(f"【{label}】\n点击越界")
-
-    def load_playback_file(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "选择录制文件", "", "Binary Files (*.bin)")
-        if filename:
-            if self.playback.load_file(filename):
-                self.lbl_play_status.setText(f"已加载: {filename.split('/')[-1]}")
-                self.btn_play.setEnabled(True)
-                self.btn_play.setText("播放")
-                self.btn_play.setChecked(False)
-            else:
-                self.lbl_play_status.setText("加载失败")
-
-    def toggle_playback(self):
-        if self.btn_play.isChecked():
-            self.playback.start()
-            self.btn_play.setText("暂停")
-        else:
-            self.playback.pause()
-            self.btn_play.setText("播放")
-
-    def update_playback_ui(self, current, total):
-        self.lbl_play_status.setText(f"进度: {current}/{total}")
-
-    def on_playback_finished(self):
-        self.btn_play.setChecked(False)
-        self.btn_play.setText("播放")
-        self.lbl_play_status.setText("播放结束")
-
-    def update_img_levels(self, img, min_val, max_val):
-        img.setLevels([min_val, max_val])
 
     def toggle_connect(self):
         if not self.receiving:
@@ -585,11 +586,30 @@ class MainWindow(QMainWindow):
         self.btn_reconstruct.setEnabled(True)
         self.progress_reconstruct.setValue(100)
         
-        # Display Result in the Intensity/Range Tabs
-        self.img_int.setImage(intensity.T, autoLevels=True)
-        self.img_rng.setImage(rng.T, autoLevels=True)
+        # Store Raw Results
+        self.raw_recon_int = intensity
+        self.raw_recon_rng = rng
         
         self.lbl_pixel_info.setText("重建完成")
+        
+        # Trigger Display Update (Apply Processing if checked)
+        self.update_offline_display()
+
+    def update_offline_display(self):
+        if self.raw_recon_int is None:
+            return
+
+        # Check if we should apply processing
+        if self.chk_apply_realtime.isChecked():
+            processed_int, processed_rng = self.processor.process(self.raw_recon_int, self.raw_recon_rng)
+            self.img_int.setImage(processed_int.T, autoLevels=False)
+            self.img_rng.setImage(processed_rng.T, autoLevels=False)
+            self.lbl_pixel_info.setText("重建完成 (已应用后处理)")
+        else:
+            self.img_int.setImage(self.raw_recon_int.T, autoLevels=False)
+            self.img_rng.setImage(self.raw_recon_rng.T, autoLevels=False)
+            self.lbl_pixel_info.setText("重建完成 (原始数据)")
+
         
     def on_reconstruct_error(self, msg):
         self.btn_reconstruct.setEnabled(True)

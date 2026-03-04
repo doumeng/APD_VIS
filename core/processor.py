@@ -1,6 +1,5 @@
 import numpy as np
 import time
-
 try:
     import open3d as o3d
     HAS_OPEN3D = True
@@ -13,8 +12,7 @@ try:
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
-    print("Warning: OpenCV not found. Using SciPy/NumPy fallbacks.")
-    import scipy.ndimage
+    print("Warning: OpenCV not found. Completion algorithms will be disabled.")
 
 class ImageProcessor:
     def __init__(self):
@@ -134,62 +132,63 @@ class ImageProcessor:
                 noise_y = y_idx[noise_mask_pcd]
                 
                 proc_rng[noise_y, noise_x] = 0
+                proc_int[noise_y, noise_x] = 0
 
         # --- 4. Completion ---
+        if not HAS_CV2:
+            return proc_int, proc_rng
+            
         mode = self.settings['completion_mode']
         
         if mode == 'connected':
             hole_size = self.settings['hole_size']
-            # Mask of valid pixels (assuming > 0 is valid)
-            valid_mask = proc_rng > 0
-            # Holes are !valid_mask (where value is 0 or NaN)
-            hole_mask = ~valid_mask
+            # Mask of holes (assuming <= 0 is hole/invalid)
+            # proc_rng is float, usually 0 for invalid.
+            hole_mask_uint8 = (proc_rng <= 0).astype(np.uint8)
             
-            # Label connected components of holes
-            # Using SciPy logic as default since CV2 might be missing or float compat issues
-            # Scipy label works on boolean array
-            labeled_array, num_features = scipy.ndimage.label(hole_mask)
+            # Connected Components
+            # connectivity=8 for 8-neighbor
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(hole_mask_uint8, connectivity=8)
             
-            if num_features > 0:
-                # Calculate sizes of each component
-                # index 1..num_features
-                sizes = scipy.ndimage.sum(hole_mask, labeled_array, index=np.arange(1, num_features + 1))
+            # stats: [x, y, width, height, area]
+            # Label 0 is the background (valid pixels, since hole_mask has holes as 1)
+            # Identify small holes (area < hole_size)
+            # We skip label 0.
+            
+            if num_labels > 1:
+                # stats[0] is background, stats[1:] are components
+                # areas corresponding to labels 1..N-1
+                areas = stats[1:, cv2.CC_STAT_AREA]
                 
-                # Identify small holes (size < threshold)
-                small_holes_indices = np.where(sizes < hole_size)[0] + 1
+                # Get labels of components smaller than hole_size
+                # np.where returns indices into 'areas', which is 0-based relative to stats[1:]
+                # So actual label is index + 1
+                small_hole_labels = np.where(areas < hole_size)[0] + 1
                 
-                if len(small_holes_indices) > 0:
-                    # Create mask of small holes to be filled
-                    small_holes_mask = np.isin(labeled_array, small_holes_indices)
+                if len(small_hole_labels) > 0:
+                    # Create mask of small holes
+                    # np.isin checks elements of 'labels' against 'small_hole_labels'
+                    small_holes_mask = np.isin(labels, small_hole_labels)
                     
-                    # Fill logic:
-                    # Simple approach: Replace small holes with maximum of local neighborhood (dilation)
-                    # This effectively closes the hole with surrounding values.
-                    # We can iterate dilation until hole is filled, or just once for speed.
-                    # For real-time, one pass of a larger kernel or multiple passes of 3x3.
+                    # Fill logic: Use inpaint for better hole filling
+                    # mask needs to be uint8
+                    inpaint_mask = small_holes_mask.astype(np.uint8)
                     
-                    # Let's use a 3x3 grey dilation on the valid pixels.
-                    # To do this effectively:
-                    # 1. Temporarily fill holes with 0 (done)
-                    # 2. Compute max in neighborhood
-                    # 3. If pixel is in small_holes_mask, replace with max.
-                    # Note: If neighbors are also holes, max is 0. So we might need multiple passes or larger kernel.
-                    # Better: 'grey_closing' is robust but modifies valid pixels too.
-                    # We only want to modify 'small_holes_mask'.
-                    
-                    # Fast approximation: Maximum filter (3x3)
-                    # We ignore 0s during max? No, standard max includes 0.
-                    # So we need a "max of valid neighbors".
-                    # This is tricky in pure numpy fast.
-                    # Alternative: Use scipy.ndimage.grey_dilation but ensure 0 doesn't propagate if neighbors exist.
-                    
-                    # Let's try simple closing on the whole image, then apply ONLY to the mask.
-                    closed_rng = scipy.ndimage.grey_closing(proc_rng, size=(3,3))
-                    proc_rng[small_holes_mask] = closed_rng[small_holes_mask]
+                    # Radius 3 pixels
+                    proc_rng = cv2.inpaint(proc_rng, inpaint_mask, 3, cv2.INPAINT_TELEA)
+                    proc_int = cv2.inpaint(proc_int, inpaint_mask, 3, cv2.INPAINT_TELEA)
 
         elif mode == 'morphological':
-            k_size = self.settings['morph_kernel']
-            # Simple morphological closing
-            proc_rng = scipy.ndimage.grey_closing(proc_rng, size=(k_size, k_size))
+            k_size = int(self.settings['morph_kernel'])
+            kernel = np.ones((k_size, k_size), np.uint8)
+            
+            # Dilate to fill holes
+            dilated_rng = cv2.dilate(proc_rng, kernel, iterations=1)
+            dilated_int = cv2.dilate(proc_int, kernel, iterations=1)
+            
+            # Only fill where original value was 0 (or invalid)
+            # Assuming 0 is the hole value. 
+            proc_rng = np.where(proc_rng <= 0, dilated_rng, proc_rng)
+            proc_int = np.where(proc_int <= 0, dilated_int, proc_int)
 
         return proc_int, proc_rng

@@ -182,35 +182,61 @@ class Reconstructor(QThread):
                 reconstructed_rng[invalid_mask] = 0
                 
             elif self.algorithm == "derivative":
-                # Derivative method (Step and Threshold)
-                step = int(self.params.get('step', 1))
-                if step < 1: step = 1
-                threshold = float(self.params.get('threshold', 0))
+
+                gate_length = int(self.params.get('step', 8))
+                if gate_length < 1: gate_length = 1
+                derivative_criterion = float(self.params.get('threshold', 0))
+
+                histogram[:, :, :50] = 0
+                histogram[:, :, -50:] = 0
+
+                # Histogram shape: (W, H, Bins)
+                W, H, Bins = histogram.shape
                 
-                h_start = histogram[:, :, :-step].astype(np.int32)
-                h_end = histogram[:, :, step:].astype(np.int32)
-                diff = h_end - h_start
+                num_gates = Bins // gate_length
+                hist_truncated = histogram[:, :, :num_gates*gate_length]                
+                gate_counts = hist_truncated.reshape(W, H, num_gates, gate_length).sum(axis=3).astype(np.int32)
                 
-                if diff.shape[2] > 100:
-                    diff[:, :, :50] = 0
-                    diff[:, :, -50:] = 0
+                # Rising edge criterion: Gate[k] - Gate[k-2], k in [2, num_gates-1]
+                # diff index i corresponds to gate k=i+2 in gate_counts.
+                diff =gate_counts[:, :, :-2] -gate_counts[:, :, 2:]
                 
-                # Find max derivative (steepest rising edge)
-                max_indices = np.argmax(diff, axis=2)
+                # 3. Find Max Rising Edge
                 max_vals = np.max(diff, axis=2)
+                max_pos = np.argmax(diff, axis=2)
                 
-                # Apply threshold
-                # If max derivative < threshold, signal is invalid
-                valid_mask = max_vals >= threshold
+                # 4. Thresholding
+                valid_mask = max_vals >= derivative_criterion
                 
-                reconstructed_int = max_vals.astype(np.float32)
-                tof_map = max_indices.astype(np.float32)
-                
-                reconstructed_rng = (16000 - 2 * tof_map) * 0.15
-                
-                # Zeros where invalid
-                reconstructed_rng[~valid_mask] = 0
-                reconstructed_int[~valid_mask] = 0
+                for x in range(W):
+                    for y in range(H):
+                        if not valid_mask[x, y]:
+                            continue
+                            
+                        k = max_pos[x, y] + 2
+                        start_bin = k * gate_length
+                        end_bin = (k + 2) * gate_length
+                        
+                        # Clip end_bin (though usually won't exceed unless k is at end)
+                        if end_bin > Bins: end_bin = Bins
+                        
+                        # Get histogram slice
+                        subset_counts = histogram[x, y, start_bin:end_bin].astype(np.float32)
+                        total_count = np.sum(subset_counts)
+                        
+                        if total_count > 0:
+                            # Calculate Weighted Mean ToF
+                            # Local indices: 0 .. len-1
+                            local_indices = np.arange(len(subset_counts))
+                            # Global bin indices = start_bin + local_indices
+                            weighted_sum = np.sum(subset_counts * (start_bin + local_indices))
+                            mean_tof = weighted_sum / total_count
+                            
+                            reconstructed_int[x, y] = max_vals[x, y]
+                            reconstructed_rng[x, y] = (16000 - 2 * mean_tof) * 0.15
+                        else:
+                             reconstructed_int[x, y] = 0
+                             reconstructed_rng[x, y] = 0
             
             self.sig_finished.emit(reconstructed_int, reconstructed_rng)
             
