@@ -158,6 +158,7 @@ class UdpReceiver(threading.Thread):
                         if task_type == 0: # Int + Rng
                             intensity, rng = DataParser.parse_intensity_range(full_data)
                             self.callback_int_rng(intensity, rng)
+                            
                         elif task_type == 1: # ToF
                             tof = DataParser.parse_tof(full_data)
                             self.callback_tof(tof)

@@ -1,0 +1,3044 @@
+==================================================
+File: config.py
+==================================================
+
+# Configuration File
+# ------------------
+# Define constants and default values here.
+
+import struct
+
+# Network
+DEFAULT_IP = "0.0.0.0"
+DEFAULT_PORT = 10000
+
+# Data Protocol
+IMG_WIDTH = 128
+IMG_HEIGHT = 128
+PIXEL_COUNT = IMG_WIDTH * IMG_HEIGHT
+
+
+BYTES_PER_PIXEL = 4
+FRAME_PAYLOAD_SIZE = PIXEL_COUNT * BYTES_PER_PIXEL
+
+
+# Protocol Constants (Confirmed)
+PACKET_HEADER = b'\x55\xaa'  # Little-endian or Big-endian? 0xAA55 usually means 0x55 then 0xAA if little-endian. Let's assume network order.
+# User said "1~2 帧头 START 0XAA55".
+# Let's assume standard network byte order (Big Endian) for now unless specified.
+# struct.unpack('>H') -> 0xAA55. So bytes would be \xaa\x55.
+
+# Packet Structure Offsets (0-indexed)
+OFFSET_START = 0
+OFFSET_CONTROL = 2
+OFFSET_TASK_ID = 4
+OFFSET_TYPE = 7
+OFFSET_SEQ = 8
+OFFSET_DATA = 9
+DATA_LEN = 4096
+OFFSET_FCS = 9 + DATA_LEN
+OFFSET_END = 9 + DATA_LEN + 1
+
+PACKET_SIZE = OFFSET_END + 2 # 4108 bytes
+
+# Task Types
+TASK_TYPE_INTENSITY_RANGE = 0
+TASK_TYPE_TOF = 1
+
+# Debug
+RECEIVER_DEBUG = False
+
+# Fragment Count
+TOTAL_FRAGMENTS = 16 # 65536 / 4096
+TOF_TOTAL_FRAGMENTS = 8
+
+# Scaling Factors
+RANGE_SCALE_FACTOR = 10.0  # Real Value = Raw / 10.0
+INTENSITY_MAX_VAL = 200    # Expected max intensity value
+
+# UI Defaults
+DEFAULT_INTENSITY_CMAP = None
+DEFAULT_RANGE_CMAP = 'jet'
+DEFAULT_TOF_CMAP = 'plasma'
+
+
+==================================================
+File: main.py
+==================================================
+
+import sys
+import os
+import numpy as np
+import threading
+import time
+import socket
+from collections import defaultdict
+import struct
+
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QSpinBox, QPushButton, QCheckBox, QGroupBox, QTabWidget, QSplitter, QFileDialog
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
+from PyQt5 import uic
+import pyqtgraph as pg
+
+from core.parser import DataParser
+from core.receiver import UdpReceiver
+from core.recorder import DataRecorder
+from core.playback import PlaybackManager
+from core.reconstructor import Reconstructor
+from core.processor import ImageProcessor
+from utils.theme import apply_dark_theme
+from utils.colormaps import get_colormap
+import config
+
+def resource_path(relative_path):
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+# =============================================================================
+# Main Window
+# =============================================================================
+class MainWindow(QMainWindow):
+    sig_update_int_rng = pyqtSignal(object, object)
+    sig_update_tof = pyqtSignal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("单光子激光雷达上位机 v3.0")
+        # self.resize(2000, 900)
+        
+        self.receiver = None
+        self.recorder = DataRecorder()
+        self.playback = PlaybackManager()
+        self.processor = ImageProcessor()
+        
+        # Store Raw Reconstructed Data for reprocessing
+        self.raw_recon_int = None
+        self.raw_recon_rng = None
+        
+        self.recorder.start() # Start recorder thread
+        self.receiving = False
+        
+        self.init_ui()
+        
+        # Connect signals
+        self.sig_update_int_rng.connect(self.update_display_int_rng)
+        self.sig_update_tof.connect(self.update_display_tof)
+        
+        # Initialize Algorithm Settings Logic
+        self.init_algo_settings()
+
+        # Playback Signals
+        self.playback.sig_update_int_rng.connect(self.update_display_int_rng)
+        self.playback.sig_update_tof.connect(self.update_display_tof)
+        self.playback.sig_progress.connect(self.update_playback_ui)
+        self.playback.sig_finished.connect(self.on_playback_finished)
+        
+        # Timer for updating status
+        self.status_timer = QTimer()
+        self.status_timer.timeout.connect(self.update_status)
+        self.status_timer.start(1000)
+
+    def closeEvent(self, event):
+        if self.receiver:
+            self.receiver.stop()
+        if self.recorder:
+            self.recorder.close()
+        if self.playback:
+            self.playback.close()
+        event.accept()
+
+    def init_ui(self):
+        # Load UI from file
+        try:
+            uic.loadUi(resource_path(os.path.join("ui", "mainwindow.ui")), self)
+        except Exception as e:
+            print(f"Error loading UI: {e}")
+            return
+
+        # Setup Splitter Sizes (70% - 30%)
+        self.splitter.setSizes([896, 384])
+        
+        # Init FPS Counters
+        self.fps_int_last_time = time.time()
+        self.fps_tof_last_time = time.time()
+
+        # Access Widgets directly (they are now members of self)
+        
+        # --- Setup Graphics (PyQtGraph) ---
+        # 1. Intensity Image
+        self.img_int, self.txt_fps_int = self.setup_image_view(self.glw_int, self.sb_int_min, self.sb_int_max, config.DEFAULT_INTENSITY_CMAP)
+        
+        # 2. Range Image
+        self.img_rng, self.txt_fps_rng = self.setup_image_view(self.glw_rng, self.sb_rng_min, self.sb_rng_max, config.DEFAULT_RANGE_CMAP)
+        
+        # 3. ToF Image
+        self.img_tof, self.txt_fps_tof = self.setup_image_view(self.glw_tof, self.sb_tof_min, self.sb_tof_max, config.DEFAULT_TOF_CMAP)
+        
+        # 4. Histograms
+        # plot_hist_int, plot_hist_rng, plot_hist_tof are promoted PlotWidgets
+        self.hist_int = self.plot_hist_int.getPlotItem()
+        self.hist_rng = self.plot_hist_rng.getPlotItem()
+        self.hist_tof = self.plot_hist_tof.getPlotItem()
+        
+        self.hist_int.setTitle("强度分布直方图")
+        self.hist_rng.setTitle("距离分布直方图")
+        self.hist_tof.setTitle("ToF 统计直方图")
+        
+        # --- Setup Reconstruction UI (Dynamic Layout) ---
+        self.setup_reconstruction_ui()
+
+        # --- Connect Signals ---
+        # Net
+        self.btn_conn.clicked.connect(self.toggle_connect)
+        
+        # Rec
+        self.btn_rec.clicked.connect(self.toggle_record)
+        self.btn_set_rec_path.clicked.connect(self.select_recording_path)
+        
+        # Playback
+        self.btn_load.clicked.connect(self.load_playback_file)
+        self.btn_play.clicked.connect(self.toggle_playback_or_stream)
+        
+        # Reconstruction
+        self.btn_reconstruct.clicked.connect(self.start_reconstruction)
+        
+        # Mouse Clicks
+        try:
+            self.img_int.scene().sigMouseClicked.connect(lambda evt: self.on_image_click(evt, self.img_int, "Intensity"))
+            self.img_rng.scene().sigMouseClicked.connect(lambda evt: self.on_image_click(evt, self.img_rng, "Range"))
+            self.img_tof.scene().sigMouseClicked.connect(lambda evt: self.on_image_click(evt, self.img_tof, "ToF"))
+        except AttributeError:
+            print("Warning: Could not connect mouse click events (scene not ready?)")
+
+    def setup_reconstruction_ui(self):
+        # Organize Reconstruction Tab into 3 Groups
+        # Find the parent widget of reconstruction controls (likely a Tab or Widget)
+        # We assume they are in a layout. We will reparent them.
+        
+        parent_widget = self.btn_reconstruct.parent()
+        layout = parent_widget.layout()
+        
+        # If no layout, create one
+        if layout is None:
+            layout = QVBoxLayout(parent_widget)
+        
+        # Clear existing layout (but keep widgets alive)
+        # We can't easily clear layout without deleting widgets.
+        # Instead, we will create new GroupBoxes and move widgets into them.
+        
+        # 1. Data Settings Group
+        gb_data = QGroupBox("数据设置")
+        layout_data = QVBoxLayout()
+        gb_data.setLayout(layout_data)
+        
+        # Add Frame Count Input
+        lbl_frames = QLabel("重建帧数 (0=全部):")
+        self.sb_recon_frames = QSpinBox()
+        self.sb_recon_frames.setRange(0, 100000)
+        self.sb_recon_frames.setValue(0)
+        
+        layout_data.addWidget(lbl_frames)
+        layout_data.addWidget(self.sb_recon_frames)
+        
+        # 2. Spatial Filter Group
+        gb_spatial = QGroupBox("空间滤波")
+        layout_spatial = QVBoxLayout()
+        gb_spatial.setLayout(layout_spatial)
+        
+        # Move existing widgets
+        # We remove them from their old layout first if possible, or just add them to new layout (automatically reparents)
+        layout_spatial.addWidget(self.chk_spatial_corr)
+        layout_spatial.addWidget(QLabel("邻域大小:"))
+        layout_spatial.addWidget(self.sb_spatial_kernel)
+        
+        # 3. Algorithm Config Group
+        gb_algo = QGroupBox("重建算法配置")
+        layout_algo = QVBoxLayout()
+        gb_algo.setLayout(layout_algo)
+        
+        layout_algo.addWidget(self.rb_offline_peak)
+        layout_algo.addWidget(self.rb_offline_matched)
+        
+        # Horizontal layout for Matched Filter params
+        h_matched = QHBoxLayout()
+        h_matched.addWidget(QLabel("脉宽:"))
+        h_matched.addWidget(self.sb_matched_width)
+        layout_algo.addLayout(h_matched)
+        
+        layout_algo.addWidget(self.rb_offline_derivative)
+        
+        # Horizontal layout for Derivative params
+        h_deriv = QHBoxLayout()
+        h_deriv.addWidget(QLabel("步长:"))
+        h_deriv.addWidget(self.sb_deriv_step)
+        h_deriv.addWidget(QLabel("阈值:"))
+        h_deriv.addWidget(self.sb_deriv_thresh)
+        layout_algo.addLayout(h_deriv)
+        
+        # 4. Rebuild Main Layout
+        # We need to insert these groups into the parent layout
+        # Since we can't easily replace the exact position in a loaded UI, 
+        # we might append them or try to replace the content of the tab.
+        
+        # Simplest approach: Create a new layout for the tab, add groups, add button.
+        # But we need to remove old items first to avoid duplication/mess.
+        
+        # Let's try to identify the layout items and remove them.
+        # Or just hide the old container if it exists?
+        
+        # Alternative: The existing UI likely has a Vertical Layout.
+        # We can just add our new Groups to it? No, duplicates.
+        
+        # Correct approach:
+        # Reparent the widgets. The old layout will lose them.
+        # Then add groups to the layout.
+        
+        # Let's clean the layout
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w and w not in [self.btn_reconstruct, self.chk_spatial_corr, self.sb_spatial_kernel, 
+                               self.rb_offline_peak, self.rb_offline_matched, self.sb_matched_width,
+                               self.rb_offline_derivative, self.sb_deriv_step, self.sb_deriv_thresh,
+                               self.progress_reconstruct]:
+                w.deleteLater() # Delete labels/spacers we don't track
+        
+        # Add Groups
+        layout.addWidget(gb_data)
+        layout.addWidget(gb_spatial)
+        layout.addWidget(gb_algo)
+        
+        # Add Reconstruct Button at the bottom
+        layout.addWidget(self.btn_reconstruct)
+        layout.addWidget(self.progress_reconstruct)
+        layout.addStretch()
+
+
+    def init_algo_settings(self):
+        # Initial UI State based on processor defaults
+        self.chk_dbscan.setChecked(self.processor.settings['dbscan_enabled'])
+        self.sb_dbscan_eps.setValue(self.processor.settings['dbscan_eps'])
+        self.sb_dbscan_min_points.setValue(self.processor.settings['dbscan_min_points'])
+        
+        self.chk_range_gate.setChecked(self.processor.settings['range_gate_enabled'])
+        self.sb_range_min.setValue(self.processor.settings['range_min'])
+        self.sb_range_max.setValue(self.processor.settings['range_max'])
+        
+        self.chk_intensity_filter.setChecked(self.processor.settings['intensity_filter_enabled'])
+        self.sb_min_intensity.setValue(self.processor.settings['min_intensity'])
+        
+        mode = self.processor.settings['completion_mode']
+        if mode == 'none': self.rb_comp_none.setChecked(True)
+        elif mode == 'connected': self.rb_comp_conn.setChecked(True)
+        elif mode == 'morphological': self.rb_comp_morph.setChecked(True)
+        
+        self.sb_hole_size.setValue(self.processor.settings['hole_size'])
+        self.sb_morph_kernel.setValue(self.processor.settings['morph_kernel'])
+        self.chk_apply_realtime.setChecked(self.processor.settings['enabled'])
+
+        # Connect Signals
+        self.chk_dbscan.toggled.connect(self.update_algo_settings)
+        self.sb_dbscan_eps.valueChanged.connect(self.update_algo_settings)
+        self.sb_dbscan_min_points.valueChanged.connect(self.update_algo_settings)
+        
+        self.chk_range_gate.toggled.connect(self.update_algo_settings)
+        self.sb_range_min.valueChanged.connect(self.update_algo_settings)
+        self.sb_range_max.valueChanged.connect(self.update_algo_settings)
+        
+        self.chk_intensity_filter.toggled.connect(self.update_algo_settings)
+        self.sb_min_intensity.valueChanged.connect(self.update_algo_settings)
+        
+        self.rb_comp_none.toggled.connect(self.update_algo_settings)
+        self.rb_comp_conn.toggled.connect(self.update_algo_settings)
+        self.rb_comp_morph.toggled.connect(self.update_algo_settings)
+        
+        self.sb_hole_size.valueChanged.connect(self.update_algo_settings)
+        self.sb_morph_kernel.valueChanged.connect(self.update_algo_settings)
+        self.chk_apply_realtime.toggled.connect(self.update_algo_settings)
+
+    def update_algo_settings(self):
+        mode = 'none'
+        if self.rb_comp_conn.isChecked(): mode = 'connected'
+        elif self.rb_comp_morph.isChecked(): mode = 'morphological'
+        
+        settings = {
+            'dbscan_enabled': self.chk_dbscan.isChecked(),
+            'dbscan_eps': self.sb_dbscan_eps.value(),
+            'dbscan_min_points': self.sb_dbscan_min_points.value(),
+            
+            'range_gate_enabled': self.chk_range_gate.isChecked(),
+            'range_min': self.sb_range_min.value(),
+            'range_max': self.sb_range_max.value(),
+            
+            'intensity_filter_enabled': self.chk_intensity_filter.isChecked(),
+            'min_intensity': self.sb_min_intensity.value(),
+            
+            'completion_mode': mode,
+            'hole_size': self.sb_hole_size.value(),
+            'morph_kernel': self.sb_morph_kernel.value(),
+            
+            'enabled': self.chk_apply_realtime.isChecked()
+        }
+        self.processor.update_settings(settings)
+        
+        # If not streaming and not playing back, update the offline display immediately
+        if not self.receiving and not self.playback.file_handle:
+            self.update_offline_display()
+
+    def setup_image_view(self, glw, sb_min, sb_max, cmap_name=None):
+        # glw is GraphicsLayoutWidget
+        vb = glw.addViewBox()
+        vb.setAspectLocked(True)
+        img = pg.ImageItem()
+        vb.addItem(img)
+        
+        # Add FPS Text Item
+        txt_fps = pg.TextItem(text="FPS: 0.0", color='w', anchor=(0, 0))
+        txt_fps.setPos(0, 0) # Top-left of the image (0,0)
+        vb.addItem(txt_fps)
+        
+        # Add Colorbar (HistogramLUTItem)
+        hist = pg.HistogramLUTItem()
+        hist.setImageItem(img)
+        glw.addItem(hist)
+        
+        # Set Colormap (Managed by HistogramLUTItem now)
+        if cmap_name:
+            try:
+                cmap_obj = get_colormap(cmap_name)
+                hist.gradient.setColorMap(cmap_obj)
+            except Exception as e:
+                print(f"Error loading colormap {cmap_name}: {e}")
+        
+        glw.img_item = img # Attach to widget for easy access if needed, or just return it
+        
+        # Connect SpinBoxes to Image Levels
+        # When SpinBox changes -> Update Image Levels (Histogram will update automatically)
+        sb_min.valueChanged.connect(lambda v: img.setLevels([v, sb_max.value()]))
+        sb_max.valueChanged.connect(lambda v: img.setLevels([sb_min.value(), v]))
+        
+        # When Histogram/Image changes -> Update SpinBoxes
+        # Use a flag to prevent recursion if needed, but simple update might be fine
+        def on_levels_changed(*args):
+            # Get levels from image
+            min_v, max_v = img.getLevels()
+            # Block signals to prevent feedback loop
+            sb_min.blockSignals(True)
+            sb_max.blockSignals(True)
+            sb_min.setValue(int(min_v))
+            sb_max.setValue(int(max_v))
+            sb_min.blockSignals(False)
+            sb_max.blockSignals(False)
+            
+        hist.sigLevelsChanged.connect(on_levels_changed)
+        
+        # Apply initial levels from SpinBoxes
+        img.setLevels([sb_min.value(), sb_max.value()])
+        
+        return img, txt_fps
+
+    def on_image_click(self, event, img_item, label):
+        if img_item.image is None:
+            return
+
+        # Map to item coordinates
+        pos = img_item.mapFromScene(event.scenePos())
+        x, y = int(pos.x()), int(pos.y())
+        
+        # Check bounds
+        if 0 <= x < img_item.image.shape[0] and 0 <= y < img_item.image.shape[1]:
+            val = img_item.image[x, y]
+            self.lbl_pixel_info.setText(f"【{label}】\n坐标: ({x}, {y})\n数值: {val}")
+        else:
+            self.lbl_pixel_info.setText(f"【{label}】\n点击越界")
+
+    def toggle_connect(self):
+        if not self.receiving:
+            # Stop playback if active
+            if self.playback.file_handle:
+                self.playback.stop()
+                self.lbl_play_status.setText("回放已停止")
+            
+            # Reset Play button for stream mode
+            self.btn_play.setChecked(False)
+            self.btn_play.setText("暂停推流")
+            self.btn_play.setEnabled(True)
+
+            ip = self.txt_ip.text()
+            try:
+                port = int(self.sb_port.value())
+            except ValueError:
+                port = 5005
+            
+            self.receiver = UdpReceiver(ip, port, 
+                                        self.handle_int_rng, 
+                                        self.handle_tof,
+                                        self.recorder)
+            self.receiver.start()
+            self.receiving = True
+            self.btn_conn.setText("断开")
+        else:
+            if self.receiver:
+                self.receiver.stop()
+                self.receiver.join(timeout=1.0)
+                self.receiver = None
+            self.receiving = False
+            self.btn_conn.setText("连接")
+            
+            # Reset Play button for playback mode
+            self.btn_play.setChecked(False)
+            if self.playback.file_handle:
+                self.btn_play.setText("播放")
+                self.btn_play.setEnabled(True)
+            else:
+                self.btn_play.setText("播放/暂停")
+                self.btn_play.setEnabled(False)
+
+    def load_playback_file(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "选择录制文件", "", "Binary Files (*.bin)")
+        if filename:
+            # Stop UDP stream if active
+            if self.receiving:
+                self.toggle_connect()
+
+            if self.playback.load_file(filename):
+                self.lbl_play_status.setText(f"已加载: {filename.split('/')[-1]}")
+                self.btn_play.setEnabled(True)
+                self.btn_play.setText("播放")
+                self.btn_play.setChecked(False)
+            else:
+                self.lbl_play_status.setText("加载失败")
+
+    def toggle_playback_or_stream(self):
+        # 1. UDP Stream Mode
+        if self.receiving and self.receiver:
+            if self.btn_play.isChecked(): # Paused
+                self.receiver.paused = True
+                self.btn_play.setText("恢复推流")
+            else: # Resumed
+                self.receiver.paused = False
+                self.btn_play.setText("暂停推流")
+        
+        # 2. File Playback Mode
+        elif not self.receiving and self.playback.file_handle:
+            if self.btn_play.isChecked():
+                self.playback.start()
+                self.btn_play.setText("暂停")
+            else:
+                self.playback.pause()
+                self.btn_play.setText("播放")
+
+    def update_playback_ui(self, current, total):
+        self.lbl_play_status.setText(f"进度: {current}/{total}")
+
+    def on_playback_finished(self):
+        self.btn_play.setChecked(False)
+        self.btn_play.setText("播放")
+        self.lbl_play_status.setText("播放结束")
+
+    def update_img_levels(self, img, min_val, max_val):
+        img.setLevels([min_val, max_val])
+
+    def select_recording_path(self):
+        directory = QFileDialog.getExistingDirectory(self, "选择保存文件夹", "")
+        if directory:
+            self.txt_rec_path.setText(directory)
+
+    def toggle_record(self):
+        if self.btn_rec.isChecked():
+            # Get directory
+            save_dir = self.txt_rec_path.text().strip()
+            if not save_dir:
+                save_dir = "." # Default to current dir if empty
+            
+            # Start recording (pass directory, file creation happens on first packet)
+            if self.recorder.start_recording(save_dir):
+                self.btn_rec.setText(f"停止录制")
+                self.lbl_rec_status.setText(f"录制中 (等待数据)...")
+                self.txt_rec_path.setEnabled(False)
+                self.btn_set_rec_path.setEnabled(False)
+            else:
+                self.btn_rec.setChecked(False)
+                self.lbl_rec_status.setText("录制失败")
+        else:
+            self.recorder.stop_recording()
+            self.btn_rec.setText("开始录制")
+            self.lbl_rec_status.setText("状态: 空闲")
+            self.txt_rec_path.setEnabled(True)
+            self.btn_set_rec_path.setEnabled(True)
+
+    def update_status(self):
+        status, bytes_written = self.recorder.get_status()
+        if self.recorder.recording:
+            mb = bytes_written / 1024 / 1024
+            self.lbl_rec_status.setText(f"{status} ({mb:.1f} MB)")
+
+    def handle_int_rng(self, intensity, rng):
+        self.sig_update_int_rng.emit(intensity, rng)
+
+    def handle_tof(self, tof):
+        self.sig_update_tof.emit(tof)
+
+    def start_reconstruction(self):
+        # 1. Stop any active stream/playback
+        if self.receiving:
+            self.toggle_connect()
+        if self.playback.file_handle:
+            self.playback.stop()
+            self.btn_play.setChecked(False)
+            self.btn_play.setText("播放")
+
+        # 2. Get file
+        filename, _ = QFileDialog.getOpenFileName(self, "选择 ToF 数据文件", "", "Binary Files (*.bin)")
+        if not filename: return
+
+        # 3. Get algorithm and parameters
+        algo = "peak"
+        params = {}
+        
+        # Determine Algorithm
+        if self.rb_offline_peak.isChecked():
+            algo = "peak"
+        elif self.rb_offline_matched.isChecked():
+            algo = "matched"
+            params['pulse_width'] = self.sb_matched_width.value()
+        elif self.rb_offline_derivative.isChecked():
+            algo = "derivative"
+            params['step'] = self.sb_deriv_step.value()
+            params['threshold'] = self.sb_deriv_thresh.value()
+        
+        # 4. Get Spatial Correlation setting
+        use_spatial = self.chk_spatial_corr.isChecked()
+        if use_spatial:
+            params['spatial_kernel'] = self.sb_spatial_kernel.value()
+
+        # Get Frame Limit
+        max_frames = self.sb_recon_frames.value()
+
+        # 5. Start Thread
+        self.reconstructor = Reconstructor(filename, algo, use_spatial, params, max_frames)
+        
+        self.reconstructor.sig_progress.connect(self.on_reconstruct_progress)
+        self.reconstructor.sig_finished.connect(self.on_reconstruct_finished)
+        self.reconstructor.sig_error.connect(self.on_reconstruct_error)
+        self.reconstructor.sig_global_hist.connect(self.on_global_hist_update)
+        
+        self.btn_reconstruct.setEnabled(False)
+        self.progress_reconstruct.setValue(0)
+        self.reconstructor.run()
+
+    def on_global_hist_update(self, x_axis, counts):
+        # Plot Global Histogram on ToF Histogram Widget
+        try:
+            x_axis = np.asarray(x_axis)
+            counts = np.asarray(counts)
+
+            # pyqtgraph stepMode=True requires len(x) == len(y) + 1
+            if x_axis.ndim == 1 and counts.ndim == 1:
+                if len(x_axis) == len(counts):
+                    if len(x_axis) > 0:
+                        step = x_axis[-1] - x_axis[-2] if len(x_axis) > 1 else 1
+                        x_axis = np.append(x_axis, x_axis[-1] + step)
+                    else:
+                        x_axis = np.array([0])
+                elif len(x_axis) > len(counts) + 1:
+                    x_axis = x_axis[:len(counts) + 1]
+                elif len(x_axis) < len(counts) + 1:
+                    counts = counts[:max(0, len(x_axis) - 1)]
+
+            self.hist_tof.plot(x_axis, counts, stepMode=True, fillLevel=0, brush=(255, 100, 0, 150), clear=True)
+            self.hist_tof.setTitle("ToF 全局光子分布直方图")
+        except Exception as e:
+            print(f"Error plotting global histogram: {e}")
+
+    def on_reconstruct_progress(self, val):
+        self.progress_reconstruct.setValue(val)
+
+    def on_reconstruct_finished(self, intensity, rng):
+        self.btn_reconstruct.setEnabled(True)
+        self.progress_reconstruct.setValue(100)
+        
+        # Store Raw Results
+        self.raw_recon_int = intensity
+        self.raw_recon_rng = rng
+        
+        self.lbl_pixel_info.setText("重建完成")
+        
+        # Trigger Display Update (Apply Processing if checked)
+        self.update_offline_display()
+
+    def update_offline_display(self):
+        if self.raw_recon_int is None:
+            return
+
+        # Check if we should apply processing
+        if self.chk_apply_realtime.isChecked():
+            processed_int, processed_rng = self.processor.process(self.raw_recon_int, self.raw_recon_rng)
+            self.img_int.setImage(processed_int.T, autoLevels=False)
+            self.img_rng.setImage(processed_rng.T, autoLevels=False)
+            self.lbl_pixel_info.setText("重建完成 (已应用后处理)")
+        else:
+            self.img_int.setImage(self.raw_recon_int.T, autoLevels=False)
+            self.img_rng.setImage(self.raw_recon_rng.T, autoLevels=False)
+            self.lbl_pixel_info.setText("重建完成 (原始数据)")
+
+        
+    def on_reconstruct_error(self, msg):
+        self.btn_reconstruct.setEnabled(True)
+        self.progress_reconstruct.setValue(0)
+        self.lbl_pixel_info.setText(f"重建错误: {msg}")
+        print(f"Reconstruction Error: {msg}")
+
+    @pyqtSlot(object, object)
+    def update_display_int_rng(self, intensity, rng):
+        # Apply Post-Processing
+        intensity, rng = self.processor.process(intensity, rng)
+
+        # Update FPS
+        curr_time = time.time()
+        dt = curr_time - self.fps_int_last_time
+        if dt > 0:
+            fps = 1.0 / dt
+            # Update both text items
+            self.txt_fps_int.setText(f"FPS: {fps:.1f}")
+            self.txt_fps_rng.setText(f"FPS: {fps:.1f}")
+        self.fps_int_last_time = curr_time
+
+        self.img_int.setImage(intensity.T, autoLevels=False)
+        self.img_rng.setImage(rng.T, autoLevels=False)
+        
+        try:
+            # Downsample for faster histogram
+            ds_int = intensity[::4, ::4]
+            y, x = np.histogram(ds_int, bins=50)
+            self.hist_int.plot(x, y, stepMode=True, fillLevel=0, brush=(0,0,255,150), clear=True)
+            
+            ds_rng = rng[::4, ::4]
+            y, x = np.histogram(ds_rng, bins=50)
+            self.hist_rng.plot(x, y, stepMode=True, fillLevel=0, brush=(0,255,0,150), clear=True)
+        except:
+            pass
+
+    @pyqtSlot(object)
+    def update_display_tof(self, tof):
+        # Update FPS
+        curr_time = time.time()
+        dt = curr_time - self.fps_tof_last_time
+        if dt > 0:
+            fps = 1.0 / dt
+            self.txt_fps_tof.setText(f"FPS: {fps:.1f}")
+        self.fps_tof_last_time = curr_time
+
+        self.img_tof.setImage(tof.T, autoLevels=False)
+        try:
+            ds_tof = tof[::4, ::4]
+            y, x = np.histogram(ds_tof, bins=50)
+            self.hist_tof.plot(x, y, stepMode=True, fillLevel=0, brush=(255,0,0,150), clear=True)
+        except:
+            pass
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    
+    # Apply Linux-style Dark Theme
+    apply_dark_theme(app)
+    
+    # PyQtGraph Global Config for consistency with Dark Theme
+    pg.setConfigOption('background', '#1e1e1e') # Darker than default 'k' (black) to match input fields? Or stick to black? 
+    # Black is best for scientific data usually. Let's use standard hex for consistent dark grey if desired, 
+    # but black (k) is standard for plots.
+    # Let's stick to 'k' but make foreground slightly off-white.
+    pg.setConfigOption('background', 'k')
+    pg.setConfigOption('foreground', '#dcdcdc') # Matches our theme text color
+    
+    w = MainWindow()
+    w.show()
+    sys.exit(app.exec_())
+
+
+==================================================
+File: core\parser.py
+==================================================
+
+import numpy as np
+import struct
+from config import *
+
+class DataParser:
+    @staticmethod
+    def parse_intensity_range(raw_data):
+        """
+        Parse raw bytes (65536 bytes) into Intensity and Range images.
+        Format: Interleaved [Range(uint16), Intensity(uint16)]
+        Range: First 2 bytes (Little/Big Endian? Assume Little for now)
+        Intensity: Next 2 bytes
+        """
+        # Convert bytes to uint16 array
+        # assuming Little Endian (<H) based on typical embedded systems
+        # User didn't specify endianness, start with Little Endian (<)
+        data_u16 = np.frombuffer(raw_data, dtype=np.uint16)
+        
+        # Reshape to (Pixel Count, 2)
+        # Col 0: Range, Col 1: Intensity
+        pixels = data_u16.reshape(-1, 2)
+        
+        intensity_raw = pixels[:, 0]
+        range_raw = pixels[:, 1]
+        
+        # Scaling
+        range_img = range_raw.reshape((IMG_HEIGHT, IMG_WIDTH)).astype(np.float32) / RANGE_SCALE_FACTOR
+        intensity_img = intensity_raw.reshape((IMG_HEIGHT, IMG_WIDTH)).astype(np.float32)
+        
+        return intensity_img, range_img
+
+    @staticmethod
+    def parse_tof(raw_data):
+        """
+        Parse raw bytes (32768 bytes) into ToF image.
+        Format: uint16 per pixel (128x128 = 16384 pixels)
+        """
+        # 16384 * 2 bytes = 32768 bytes
+        if len(raw_data) != 32768:
+            # Fallback or error handling
+            # Maybe it's still 65536 bytes (2 frames)? 
+            # Or maybe padded?
+            # Let's try to slice or pad if needed, but ideally it should match.
+            pass
+
+        data_u16 = np.frombuffer(raw_data, dtype=np.uint16)[0:PIXEL_COUNT] # Take only the first 16384 values
+        tof_img = data_u16.reshape((IMG_HEIGHT, IMG_WIDTH)).astype(np.float32)
+        return tof_img
+
+
+==================================================
+File: core\playback.py
+==================================================
+
+import threading
+import time
+import os
+import struct
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from core.parser import DataParser
+
+# Frame Sizes (in bytes)
+FRAME_SIZE_DEPTH = 65536  # 128x128 * 2 (Int) + 128x128 * 2 (Rng) = 65536
+FRAME_SIZE_TOF = 32768    # 128x128 * 2 (ToF uint16) = 32768
+
+class PlaybackManager(QObject):
+    sig_update_int_rng = pyqtSignal(object, object) # intensity, range
+    sig_update_tof = pyqtSignal(object) # tof
+    sig_progress = pyqtSignal(int, int) # current, total
+    sig_finished = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.filename = None
+        self.file_handle = None
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.read_next_frame)
+        self.total_frames = 0
+        self.current_frame = 0
+        self.paused = False
+        self.frame_size = 0
+        self.data_type = 0 # 0: Depth, 1: ToF
+
+    def load_file(self, filename):
+        if not os.path.exists(filename):
+            return False
+        
+        self.filename = filename
+        
+        # Determine Type and Frame Size from Filename Prefix
+        fname = os.path.basename(filename).lower()
+        if fname.startswith("tof_"):
+            self.data_type = 1
+            self.frame_size = FRAME_SIZE_TOF
+        elif fname.startswith("depth_"):
+            self.data_type = 0
+            self.frame_size = FRAME_SIZE_DEPTH
+        else:
+            # Fallback based on file size or try both?
+            # Default to Depth for safety if unknown
+            self.data_type = 0
+            self.frame_size = FRAME_SIZE_DEPTH
+            print(f"Warning: Unknown file prefix '{fname}'. Defaulting to Depth mode.")
+
+        try:
+            self.file_handle = open(filename, 'rb')
+            
+            # Calculate total frames
+            self.file_handle.seek(0, os.SEEK_END)
+            file_size = self.file_handle.tell()
+            if self.frame_size > 0:
+                self.total_frames = file_size // self.frame_size
+            else:
+                self.total_frames = 0
+                
+            self.file_handle.seek(0)
+            self.current_frame = 0
+            return True
+        except Exception as e:
+            print(f"Error opening file: {e}")
+            return False
+
+    def start(self, interval_ms=20):
+        if not self.file_handle:
+            return
+        self.paused = False
+        self.timer.start(interval_ms)
+
+    def pause(self):
+        self.paused = True
+        self.timer.stop()
+        
+    def stop(self):
+        self.paused = False
+        self.timer.stop()
+        if self.file_handle:
+            self.file_handle.seek(0)
+            self.current_frame = 0
+            
+    def seek(self, frame_idx):
+        if not self.file_handle:
+            return
+        
+        frame_idx = max(0, min(frame_idx, self.total_frames - 1))
+        self.current_frame = frame_idx
+        self.file_handle.seek(frame_idx * self.frame_size)
+        self.sig_progress.emit(self.current_frame, self.total_frames)
+
+    def read_next_frame(self):
+        if not self.file_handle:
+            return
+
+        # Read Frame Data (Raw Payload)
+        data = self.file_handle.read(self.frame_size)
+        
+        if len(data) < self.frame_size:
+            self.stop()
+            self.sig_finished.emit()
+            return
+            
+        # Parse based on Type
+        if self.data_type == 0: # Depth (Int + Rng)
+            intensity, rng = DataParser.parse_intensity_range(data)
+            self.sig_update_int_rng.emit(intensity, rng)
+        elif self.data_type == 1: # ToF
+            tof = DataParser.parse_tof(data)
+            self.sig_update_tof.emit(tof)
+            
+        self.current_frame += 1
+        self.sig_progress.emit(self.current_frame, self.total_frames)
+
+    def close(self):
+        self.stop()
+        if self.file_handle:
+            self.file_handle.close()
+
+
+==================================================
+File: core\processor.py
+==================================================
+
+import numpy as np
+import time
+try:
+    import open3d as o3d
+    HAS_OPEN3D = True
+except ImportError:
+    HAS_OPEN3D = False
+    print("Warning: Open3D not found. DBSCAN denoising will be disabled.")
+
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+    print("Warning: OpenCV not found. Completion algorithms will be disabled.")
+
+class ImageProcessor:
+    def __init__(self):
+        self.settings = {
+            # Denoising
+            'dbscan_enabled': False,
+            'dbscan_eps': 3,
+            'dbscan_min_points': 5,
+            
+            'range_gate_enabled': False,
+            'range_min': 0.1,
+            'range_max': 10.0,
+            
+            'intensity_filter_enabled': False,
+            'min_intensity': 10,
+            
+            # Completion
+            'completion_mode': 'none', # 'none', 'connected', 'morphological'
+            'hole_size': 16,
+            'morph_kernel': 3,
+            
+            'enabled': True
+        }
+        
+        # Optimization: Pre-allocate point cloud if possible or reuse
+        self.pcd = None
+        if HAS_OPEN3D:
+            self.pcd = o3d.geometry.PointCloud()
+
+    def update_settings(self, settings_dict):
+        """Update processing parameters."""
+        self.settings.update(settings_dict)
+
+    def process(self, intensity, rng):
+        """
+        Apply filters to intensity and range images.
+        Input:
+            intensity: 2D numpy array (128x128)
+            rng: 2D numpy array (128x128) - likely in meters or units convertable
+        Returns:
+            (processed_intensity, processed_rng)
+        """
+        if not self.settings['enabled']:
+            return intensity, rng
+
+        proc_int = intensity.copy()
+        proc_rng = rng.copy()
+
+        # --- 1. Range Gating ---
+        if self.settings['range_gate_enabled']:
+            min_r = self.settings['range_min']
+            max_r = self.settings['range_max']
+            # Assume rng is in same units as min/max (e.g., meters)
+            # If rng contains 0 for invalid, handle that.
+            mask = (proc_rng < min_r) | (proc_rng > max_r)
+            proc_rng[mask] = 0
+            # Optional: Clear intensity where range is invalid?
+            # proc_int[mask] = 0 
+
+        # --- 2. Intensity Filter ---
+        if self.settings['intensity_filter_enabled']:
+            min_i = self.settings['min_intensity']
+            mask = proc_int < min_i
+            proc_rng[mask] = 0
+            # Keep intensity as is or zero it out?
+            # Usually we filter Range based on Intensity confidence.
+
+        # --- 3. DBSCAN Denoising (Open3D) ---
+        if self.settings['dbscan_enabled'] and HAS_OPEN3D:
+            # Convert to Point Cloud
+            # Generate (x, y, z) coordinates
+            # This is slow if done every frame in Python.
+            # Assuming rng is Z, and we have a grid.
+            rows, cols = proc_rng.shape
+            
+            # Vectorized Point Cloud Generation
+            # Create grid once if size is constant (optimization)
+            # For now, do it on the fly
+            
+            valid_mask = proc_rng > 0
+            z = proc_rng[valid_mask]
+            if len(z) > 0:
+                # Get indices
+                y_idx, x_idx = np.where(valid_mask)
+                
+                # Simple conversion: x = x_idx * scale, y = y_idx * scale
+                # Let's assume arbitrary scale 1 unit per pixel for X/Y to match Z units loosely
+                # Or just treat X/Y as indices.
+                # If Z is in meters (e.g. 5.0), and X is 0..127, scale mismatch might affect DBSCAN.
+                # Usually we normalize or scale X/Y to real world if known.
+                # Let's assume Z is typically 0-10000 (mm) or 0-10 (m).
+                # If Z is mm, 128 pixels is small.
+                # Let's assume Z is generic units.
+                
+                # To make DBSCAN work well, dimensions should be comparable.
+                # Let's use simple index coordinates.
+                points = np.stack((x_idx, y_idx, z), axis=-1).astype(np.float64)
+                
+                self.pcd.points = o3d.utility.Vector3dVector(points)
+                
+                # Run DBSCAN
+                eps = self.settings['dbscan_eps']
+                min_points = self.settings['dbscan_min_points']
+                
+                # DBSCAN returns labels: -1 is noise
+                labels = np.array(self.pcd.cluster_dbscan(eps=eps, min_points=min_points, print_progress=False))
+                
+                # Identify noise points
+                noise_mask_pcd = (labels == -1)
+                
+                # Map back to image
+                # Points in 'points' correspond to 'valid_mask' locations
+                # We need to zero out noise points in proc_rng
+                
+                # Get indices of noise points relative to the original image
+                noise_x = x_idx[noise_mask_pcd]
+                noise_y = y_idx[noise_mask_pcd]
+                
+                proc_rng[noise_y, noise_x] = 0
+                proc_int[noise_y, noise_x] = 0
+
+        # --- 4. Completion ---
+        if not HAS_CV2:
+            return proc_int, proc_rng
+            
+        mode = self.settings['completion_mode']
+        
+        if mode == 'connected':
+            hole_size = self.settings['hole_size']
+            # Mask of holes (assuming <= 0 is hole/invalid)
+            # proc_rng is float, usually 0 for invalid.
+            hole_mask_uint8 = (proc_rng <= 0).astype(np.uint8)
+            
+            # Connected Components
+            # connectivity=8 for 8-neighbor
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(hole_mask_uint8, connectivity=8)
+            
+            # stats: [x, y, width, height, area]
+            # Label 0 is the background (valid pixels, since hole_mask has holes as 1)
+            # Identify small holes (area < hole_size)
+            # We skip label 0.
+            
+            if num_labels > 1:
+                # stats[0] is background, stats[1:] are components
+                # areas corresponding to labels 1..N-1
+                areas = stats[1:, cv2.CC_STAT_AREA]
+                
+                # Get labels of components smaller than hole_size
+                # np.where returns indices into 'areas', which is 0-based relative to stats[1:]
+                # So actual label is index + 1
+                small_hole_labels = np.where(areas < hole_size)[0] + 1
+                
+                if len(small_hole_labels) > 0:
+                    # Create mask of small holes
+                    # np.isin checks elements of 'labels' against 'small_hole_labels'
+                    small_holes_mask = np.isin(labels, small_hole_labels)
+                    
+                    # Fill logic: Use inpaint for better hole filling
+                    # mask needs to be uint8
+                    inpaint_mask = small_holes_mask.astype(np.uint8)
+                    
+                    # Radius 3 pixels
+                    proc_rng = cv2.inpaint(proc_rng, inpaint_mask, 3, cv2.INPAINT_TELEA)
+                    proc_int = cv2.inpaint(proc_int, inpaint_mask, 3, cv2.INPAINT_TELEA)
+
+        elif mode == 'morphological':
+            k_size = int(self.settings['morph_kernel'])
+            kernel = np.ones((k_size, k_size), np.uint8)
+            
+            # Dilate to fill holes
+            dilated_rng = cv2.dilate(proc_rng, kernel, iterations=1)
+            dilated_int = cv2.dilate(proc_int, kernel, iterations=1)
+            
+            # Only fill where original value was 0 (or invalid)
+            # Assuming 0 is the hole value. 
+            proc_rng = np.where(proc_rng <= 0, dilated_rng, proc_rng)
+            proc_int = np.where(proc_int <= 0, dilated_int, proc_int)
+
+        return proc_int, proc_rng
+
+
+==================================================
+File: core\receiver.py
+==================================================
+
+import socket
+import struct
+import threading
+import numpy as np
+from collections import defaultdict
+from core.parser import DataParser
+import config
+
+class UdpReceiver(threading.Thread):
+    def __init__(self, ip, port, callback_int_rng, callback_tof, recorder=None):
+        super().__init__()
+        self.ip = ip
+        self.port = port
+        self.callback_int_rng = callback_int_rng
+        self.callback_tof = callback_tof
+        self.recorder = recorder
+        self.running = False
+        self.paused = False
+        self.sock = None
+        self.debug = bool(getattr(config, 'RECEIVER_DEBUG', False))
+        
+        # Fragmentation Handling
+        # Buffer: {task_id: {seq: payload}}
+        self.fragments = defaultdict(dict)
+        self.fragment_counts = defaultdict(int)
+        self.expected_fragments = defaultdict(lambda: config.TOTAL_FRAGMENTS)
+
+    def _dbg(self, msg):
+        if self.debug:
+            print(f"[ReceiverDebug] {msg}")
+
+    def _parse_ctrl(self, ctrl_bytes):
+        ctrl_be = struct.unpack('>H', ctrl_bytes)[0]
+        ctrl_le = struct.unpack('<H', ctrl_bytes)[0]
+
+        be_len = ctrl_be & 0x1FFF
+        le_len = ctrl_le & 0x1FFF
+
+        # Edge C++ struct send is usually host-endian (little-endian on x86).
+        # Prefer the variant with plausible payload length.
+        if 0 < le_len <= config.DATA_LEN and not (0 < be_len <= config.DATA_LEN):
+            return ctrl_le
+        if 0 < be_len <= config.DATA_LEN and not (0 < le_len <= config.DATA_LEN):
+            return ctrl_be
+        # If both plausible, prefer little-endian for compatibility with C++ direct struct send.
+        return ctrl_le
+
+    def run(self):
+        self.running = True
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024 * 8) 
+            self.sock.bind((self.ip, self.port))
+            print(f"Listening on {self.ip}:{self.port}")
+            
+            while self.running:
+                try:
+                    self.sock.settimeout(1.0)
+                    data, addr = self.sock.recvfrom(65536) # Max UDP
+                    self._dbg(f"pkt from {addr}, len={len(data)}")
+                    
+                    if len(data) < config.PACKET_SIZE: # Too short
+                        self._dbg(f"drop short packet: len={len(data)}")
+                        continue
+                        
+                    # 1. Parse Header
+                    # Header (0-2)
+                    if data[0:2] != b'\x55\xaa': # Assuming little endian marker based on user spec "0xAA55" usually means bytes AA, 55 or 55, AA.
+                        # Wait, user said "0xAA55".
+                        # If network order (Big Endian): b'\xaa\x55'
+                        # If Intel order (Little Endian): b'\x55\xaa'
+                        # Let's try both or just check hex.
+                        # Let's assume standard network byte order first: b'\xaa\x55'
+                        if data[0:2] != b'\xaa\x55':
+                            self._dbg(f"drop bad header: {data[0:2].hex()}")
+                            continue # Invalid header
+
+                    # Control (2-4)
+                    ctrl = self._parse_ctrl(data[2:4])
+                    is_frag = (ctrl & 0x8000) >> 15
+                    frag_len = ctrl & 0x1FFF
+                    
+                    # Task ID (4-7) - 3 bytes
+                    # Python struct doesn't do 3-byte int well.
+                    # Pack 4 bytes with 0 padding?
+                    task_id_bytes = b'\x00' + data[4:7]
+                    task_id = struct.unpack('>I', task_id_bytes)[0]
+                    
+                    # Type (7-8)
+                    task_type = data[7]
+                    
+                    # Seq (8-9)
+                    seq = data[8]
+
+                    # Decide expected fragments when first fragment of task arrives
+                    if self.fragment_counts[task_id] == 0:
+                        if task_type == config.TASK_TYPE_TOF:
+                            self.expected_fragments[task_id] = config.TOF_TOTAL_FRAGMENTS
+                        else:
+                            self.expected_fragments[task_id] = config.TOTAL_FRAGMENTS
+                    
+                    # Data Payload (9-4105)
+                    payload = data[config.OFFSET_DATA:config.OFFSET_DATA + config.DATA_LEN]
+
+                    # Tail check: accept both byte orders
+                    tail = data[-2:]
+                    if tail not in (b'\x55\xAA', b'\xAA\x55'):
+                        if task_type == config.TASK_TYPE_TOF:
+                            self._dbg(f"drop tof bad tail: task={task_id}, seq={seq}, tail={tail.hex()}")
+                        continue
+
+                    expected = self.expected_fragments[task_id]
+
+                    if seq >= expected:
+                        if task_type == config.TASK_TYPE_TOF:
+                            self._dbg(f"drop tof bad seq: task={task_id}, seq={seq}, total={expected}")
+                        continue
+
+                    if frag_len == 0 or frag_len > config.DATA_LEN:
+                        if task_type == config.TASK_TYPE_TOF:
+                            self._dbg(f"drop tof bad frag_len: task={task_id}, seq={seq}, frag_len={frag_len}")
+                        continue
+                    
+                    # Checksum (4105)
+                    # TODO: Implement XOR Checksum validation
+                    
+                    # Reassembly Logic
+                    if seq not in self.fragments[task_id]:
+                        self.fragments[task_id][seq] = payload
+                        self.fragment_counts[task_id] += 1
+                    elif task_type == config.TASK_TYPE_TOF:
+                        self._dbg(f"duplicate tof fragment: task={task_id}, seq={seq}")
+                    
+                    if self.fragment_counts[task_id] == expected:
+                        # Reassemble
+                        full_data = b''.join(self.fragments[task_id][i] for i in range(expected))
+                        if task_type == config.TASK_TYPE_TOF:
+                            self._dbg(f"tof reassembled: task={task_id}, fragments={expected}, bytes={len(full_data)}")
+                        
+                        # Record Raw Data if enabled (even if paused, maybe? No, "pause push stream" usually means pause everything or just display.
+                        # User said "pause push stream", usually means pause receiving/displaying.
+                        # Let's assume pause means we don't process or display, but maybe we still buffer?
+                        # Or simpler: if paused, just don't callback.
+                        
+                        if self.paused:
+                             # Cleanup and continue
+                            del self.fragments[task_id]
+                            del self.fragment_counts[task_id]
+                            del self.expected_fragments[task_id]
+                            continue
+
+                        # Record Raw Data if enabled
+                        if self.recorder and self.recorder.recording:
+                            # Pass data and type separately. Recorder will add type byte to file.
+                            self.recorder.write_frame(full_data, task_type)
+
+                        # Process
+                        if task_type == 0: # Int + Rng
+                            intensity, rng = DataParser.parse_intensity_range(full_data)
+                            self.callback_int_rng(intensity, rng)
+                        elif task_type == 1: # ToF
+                            tof = DataParser.parse_tof(full_data)
+                            self.callback_tof(tof)
+                            
+                        # Cleanup
+                        del self.fragments[task_id]
+                        del self.fragment_counts[task_id]
+                        del self.expected_fragments[task_id]
+                        
+                        # Cleanup old fragments (TODO: Implement timeout cleanup)
+
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    print(f"Receiver Error: {e}")
+                    self._dbg("exception branch reached")
+                    
+        except Exception as e:
+            print(f"Socket Bind Error: {e}")
+        finally:
+            if self.sock:
+                self.sock.close()
+
+    def stop(self):
+        self.running = False
+        if self.sock:
+            self.sock.close()
+
+
+==================================================
+File: core\reconstructor.py
+==================================================
+
+import numpy as np
+import os
+import struct
+from PyQt5.QtCore import QThread, pyqtSignal
+import scipy.ndimage
+
+class Reconstructor(QThread):
+    sig_progress = pyqtSignal(int)
+    sig_finished = pyqtSignal(object, object) # intensity, range
+    sig_error = pyqtSignal(str)
+    sig_global_hist = pyqtSignal(object, object) # x_axis, counts
+
+    def __init__(self, filepath, algorithm="peak", use_spatial_corr=False, params=None, max_frames=0):
+        super().__init__()
+        self.filepath = filepath
+        self.algorithm = algorithm
+        self.use_spatial_corr = use_spatial_corr
+        self.params = params if params else {}
+        self.max_frames = max_frames
+        self.running = True
+
+    def run(self):
+        if not os.path.exists(self.filepath):
+            self.sig_error.emit("文件不存在")
+            return
+
+        file_size = os.path.getsize(self.filepath)
+        processed_bytes = 0
+        
+        # --- Reconstruction Parameters ---
+        width, height = 128, 128
+        tof_max = 8000 # Max ToF value per user request
+
+        try:
+            histogram = np.zeros((width, height, tof_max + 1), dtype=np.uint16)
+        except MemoryError:
+             self.sig_error.emit("内存不足: 无法分配直方图空间")
+             return
+
+        try:
+            raw_data = np.fromfile(self.filepath, dtype='<H') # Little-endian uint16
+            
+            total_pixels_per_frame = width * height
+            if raw_data.size % total_pixels_per_frame != 0:
+                # Handle incomplete frames
+                valid_len = (raw_data.size // total_pixels_per_frame) * total_pixels_per_frame
+                raw_data = raw_data[:valid_len]
+            
+            frames = raw_data.reshape(-1, width, height)
+            num_frames = frames.shape[0]
+            
+            if num_frames == 0:
+                self.sig_error.emit("文件中没有完整帧数据")
+                return
+
+            # Apply Frame Limit
+            if self.max_frames > 0 and num_frames > self.max_frames:
+                frames = frames[:self.max_frames]
+                num_frames = self.max_frames
+
+            # 2. Accumulate Histogram & Global Histogram
+            global_hist_counts = np.zeros(tof_max + 1, dtype=np.int64)
+            
+            for x in range(width):
+                if not self.running: break
+                
+                # Emit progress (0-60%)
+                progress = int((x / width) * 60)
+                self.sig_progress.emit(progress)
+                
+                for y in range(height):
+                    pixel_vals = frames[:, x, y]
+                    
+                    # Filter invalid values
+                    mask = pixel_vals <= tof_max
+                    valid_vals = pixel_vals[mask]
+                    
+                    if valid_vals.size > 0:
+                        counts = np.bincount(valid_vals, minlength=tof_max + 1)
+                        if len(counts) > tof_max + 1:
+                            counts = counts[:tof_max + 1]
+                        counts = counts.astype(np.int64, copy=False)
+                        
+                        histogram[x, y, :] = counts.astype(np.uint16)
+                        global_hist_counts += counts
+
+            # Emit Global Histogram
+            x_axis = np.arange(tof_max + 1)
+            global_hist_counts[:50] = 0
+            global_hist_counts[-50:] = 0
+            self.sig_global_hist.emit(x_axis, global_hist_counts)
+            
+            # Free frames memory
+            del frames
+            del raw_data
+            import gc
+            gc.collect()
+
+            # 3. Apply Histogram-Level Spatial Correlation
+            if self.use_spatial_corr:
+                self.sig_progress.emit(65)
+                k_size = int(self.params.get('spatial_kernel', 3))
+                if k_size % 2 == 0: k_size += 1
+                
+                # Convert to float32
+                histogram_f = histogram.astype(np.float32)
+                
+                # Apply 2D spatial smoothing on the histogram 3D volume
+                # uniform_filter calculates MEAN. 
+                # To get SUM of neighbors: sum = mean * size
+                scipy.ndimage.uniform_filter(histogram_f, size=(k_size, k_size, 1), output=histogram_f, mode='constant')
+                
+                histogram_f *= (k_size * k_size)
+                
+                histogram = histogram_f
+
+            # --- Processing Algorithms ---
+            self.sig_progress.emit(80)
+            
+            reconstructed_int = np.zeros((width, height), dtype=np.float32)
+            reconstructed_rng = np.zeros((width, height), dtype=np.float32)
+
+            if self.algorithm == "peak":
+                # Peak Detection Implementation
+                # 1. Mask first 50 and last 50 bins
+                # histogram shape: (128, 128, 16001)
+                histogram[:, :, :50] = 0
+                histogram[:, :, -50:] = 0
+                
+                # 2. Find max count and index
+                # max count = intensity
+                # index of max count = ToF
+                
+                # argmax along the ToF axis (axis 2)
+                max_indices = np.argmax(histogram, axis=2) # Shape (128, 128)
+                max_counts = np.max(histogram, axis=2)     # Shape (128, 128)
+                
+                reconstructed_int = max_counts.astype(np.float32)
+                tof_map = max_indices.astype(np.float32)
+                
+                # 3. Convert ToF to Distance
+                # Formula: (16000 - 2 * tof) * 0.15
+                reconstructed_rng = (16000 - 2 * tof_map) * 0.15
+                
+                # Handle invalid data
+                invalid_mask = (max_counts == 0)
+                reconstructed_rng[invalid_mask] = 0
+            
+            elif self.algorithm == "matched":
+                # Matched Filter (Laser Pulse Width)
+                # Convolve histogram with a Gaussian kernel corresponding to pulse width
+                pulse_width = float(self.params.get('pulse_width', 10))
+                
+                # Generate Gaussian kernel
+                # Assume pulse_width is FWHM or similar. 
+                # Sigma = width / 2.355 roughly, or just use width as parameter control.
+                # Let's use sigma = pulse_width / 2 for reasonable smoothing.
+                sigma = max(0.5, pulse_width / 2.0)
+                k_len = int(6 * sigma) + 1
+                if k_len < 3: k_len = 3
+                
+                x = np.arange(k_len) - (k_len - 1) / 2
+                kernel = np.exp(-0.5 * (x / sigma)**2)
+                kernel /= kernel.sum() # Normalize
+                
+                # Convolve along time axis (axis 2)
+                # usage of convolve1d is efficient
+                histogram = scipy.ndimage.convolve1d(histogram, kernel, axis=2)
+                
+                # Then apply Peak Detection on the smoothed histogram
+                histogram[:, :, :50] = 0
+                histogram[:, :, -50:] = 0
+                
+                max_indices = np.argmax(histogram, axis=2)
+                max_counts = np.max(histogram, axis=2)
+                
+                reconstructed_int = max_counts.astype(np.float32)
+                tof_map = max_indices.astype(np.float32)
+                reconstructed_rng = (16000 - 2 * tof_map) * 0.15
+                
+                invalid_mask = (max_counts == 0)
+                reconstructed_rng[invalid_mask] = 0
+                
+            elif self.algorithm == "derivative":
+
+                gate_length = int(self.params.get('step', 8))
+                if gate_length < 1: gate_length = 1
+                derivative_criterion = float(self.params.get('threshold', 0))
+
+                histogram[:, :, :50] = 0
+                histogram[:, :, -50:] = 0
+
+                # Histogram shape: (W, H, Bins)
+                W, H, Bins = histogram.shape
+                
+                num_gates = Bins // gate_length
+                hist_truncated = histogram[:, :, :num_gates*gate_length]                
+                gate_counts = hist_truncated.reshape(W, H, num_gates, gate_length).sum(axis=3).astype(np.int32)
+                
+                # Rising edge criterion: Gate[k] - Gate[k-2], k in [2, num_gates-1]
+                # diff index i corresponds to gate k=i+2 in gate_counts.
+                diff =gate_counts[:, :, :-2] -gate_counts[:, :, 2:]
+                
+                # 3. Find Max Rising Edge
+                max_vals = np.max(diff, axis=2)
+                max_pos = np.argmax(diff, axis=2)
+                
+                # 4. Thresholding
+                valid_mask = max_vals >= derivative_criterion
+                
+                for x in range(W):
+                    for y in range(H):
+                        if not valid_mask[x, y]:
+                            continue
+                            
+                        k = max_pos[x, y] + 2
+                        start_bin = k * gate_length
+                        end_bin = (k + 2) * gate_length
+                        
+                        # Clip end_bin (though usually won't exceed unless k is at end)
+                        if end_bin > Bins: end_bin = Bins
+                        
+                        # Get histogram slice
+                        subset_counts = histogram[x, y, start_bin:end_bin].astype(np.float32)
+                        total_count = np.sum(subset_counts)
+                        
+                        if total_count > 0:
+                            # Calculate Weighted Mean ToF
+                            # Local indices: 0 .. len-1
+                            local_indices = np.arange(len(subset_counts))
+                            # Global bin indices = start_bin + local_indices
+                            weighted_sum = np.sum(subset_counts * (start_bin + local_indices))
+                            mean_tof = weighted_sum / total_count
+                            
+                            reconstructed_int[x, y] = max_vals[x, y]
+                            reconstructed_rng[x, y] = (16000 - 2 * mean_tof) * 0.15
+                        else:
+                             reconstructed_int[x, y] = 0
+                             reconstructed_rng[x, y] = 0
+            
+            self.sig_finished.emit(reconstructed_int, reconstructed_rng)
+            
+        except Exception as e:
+            self.sig_error.emit(str(e))
+            import traceback
+            traceback.print_exc()
+
+    def stop(self):
+        self.running = False
+
+
+==================================================
+File: core\recorder.py
+==================================================
+
+import threading
+import queue
+import time
+import os
+
+class DataRecorder(threading.Thread):
+    def __init__(self):
+        super().__init__()
+        self.save_dir = "." # Default to current directory
+        self.file_handle = None
+        self.current_type = None # 0: Depth, 1: ToF
+        self.write_queue = queue.Queue()
+        self.running = False
+        self.recording = False
+        self.lock = threading.Lock()
+        self.bytes_written = 0
+        self.start_time = 0
+
+    def start_recording(self, save_dir):
+        with self.lock:
+            if self.recording:
+                return False
+            
+            try:
+                self.save_dir = save_dir
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir, exist_ok=True)
+                
+                # Reset state
+                self.file_handle = None
+                self.current_type = None
+                self.recording = True
+                self.bytes_written = 0
+                self.start_time = time.time()
+                print(f"Recorder started (Waiting for data in {save_dir})...")
+                return True
+            except Exception as e:
+                print(f"Recorder Error: {e}")
+                self.stop_recording()
+                return False
+
+    def _create_file(self, task_type):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        prefix = "depth" if task_type == 0 else "tof"
+        filename = f"{prefix}_{timestamp}.bin"
+        filepath = os.path.join(self.save_dir, filename)
+        
+        try:
+            self.file_handle = open(filepath, 'wb')
+            self.current_type = task_type
+            print(f"Created recording file: {filepath}")
+            return True
+        except Exception as e:
+            print(f"Failed to create file {filepath}: {e}")
+            return False
+
+    def stop_recording(self):
+        with self.lock:
+            if not self.recording:
+                return
+
+            self.recording = False
+            time.sleep(0.1) 
+            
+            if self.file_handle:
+                self.file_handle.close()
+                self.file_handle = None
+                self.current_type = None
+            print("Recorder stopped.")
+            
+    def write_frame(self, data, task_type):
+        if self.recording:
+            # We need to pass task_type to the queue so the writer knows which file to use
+            self.write_queue.put((data, task_type))
+
+    def run(self):
+        self.running = True
+        while self.running:
+            try:
+                # Get data with timeout
+                item = self.write_queue.get(timeout=0.5)
+                data, task_type = item
+                
+                with self.lock:
+                    # If file not created yet, create it based on first packet type
+                    if self.file_handle is None:
+                         if not self._create_file(task_type):
+                             continue # Skip if file creation failed
+                    
+                    # Only write if type matches the file type (User: "Only save one type")
+                    if self.file_handle and not self.file_handle.closed:
+                        if task_type == self.current_type:
+                            # Write Data only (No headers, no type byte)
+                            self.file_handle.write(data)
+                            self.bytes_written += len(data)
+                
+                self.write_queue.task_done()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Write Error: {e}")
+
+    def close(self):
+        self.running = False
+        self.stop_recording()
+        if self.file_handle:
+            self.file_handle.close()
+
+    def get_status(self):
+        if not self.recording:
+            return "Idle", 0
+        
+        if self.file_handle:
+            duration = time.time() - self.start_time
+            fname = os.path.basename(self.file_handle.name)
+            return f"{fname}", self.bytes_written
+        else:
+            return "Waiting for data...", 0
+
+
+==================================================
+File: core\__init__.py
+==================================================
+
+
+
+==================================================
+File: ui\mainwindow.ui
+==================================================
+
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1800</width>
+    <height>900</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>单光子激光雷达上位机 v3.0</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QHBoxLayout" name="horizontalLayout_main">
+    <item>
+     <widget class="QSplitter" name="splitter">
+      <property name="orientation">
+       <enum>Qt::Horizontal</enum>
+      </property>
+      <widget class="QTabWidget" name="tabWidget_display">
+       <property name="currentIndex">
+        <number>0</number>
+       </property>
+       <widget class="QWidget" name="tab_int_rng">
+        <attribute name="title">
+         <string>实时监控 (强度/距离)</string>
+        </attribute>
+        <layout class="QGridLayout" name="gridLayout_tab1">
+         <item row="0" column="0">
+          <widget class="QGroupBox" name="grp_int">
+           <property name="title">
+            <string>强度图像 (Intensity)</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_int">
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_int_ctrl">
+              <item>
+               <widget class="QLabel" name="label_int_range">
+                <property name="text">
+                 <string>Range:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_int_min">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_int_sep">
+                <property name="text">
+                 <string>-</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_int_max">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+                <property name="value">
+                 <number>255</number>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="GraphicsLayoutWidget" name="glw_int"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item row="0" column="1">
+          <widget class="QGroupBox" name="grp_rng">
+           <property name="title">
+            <string>距离图像 (Range)</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_rng">
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_rng_ctrl">
+              <item>
+               <widget class="QLabel" name="label_rng_range">
+                <property name="text">
+                 <string>Range:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_rng_min">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_rng_sep">
+                <property name="text">
+                 <string>-</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_rng_max">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+                <property name="value">
+                 <number>255</number>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="GraphicsLayoutWidget" name="glw_rng"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item row="1" column="0">
+          <widget class="QGroupBox" name="grp_hist_int">
+           <property name="maximumSize">
+            <size>
+             <width>16777215</width>
+             <height>250</height>
+            </size>
+           </property>
+           <property name="title">
+            <string>强度分布直方图</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_hist_int">
+            <item>
+             <widget class="PlotWidget" name="plot_hist_int"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item row="1" column="1">
+          <widget class="QGroupBox" name="grp_hist_rng">
+           <property name="maximumSize">
+            <size>
+             <width>16777215</width>
+             <height>250</height>
+            </size>
+           </property>
+           <property name="title">
+            <string>距离分布直方图</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_hist_rng">
+            <item>
+             <widget class="PlotWidget" name="plot_hist_rng"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+       <widget class="QWidget" name="tab_tof">
+        <attribute name="title">
+         <string>光子飞行时间 (ToF)</string>
+        </attribute>
+        <layout class="QVBoxLayout" name="verticalLayout_tab2">
+         <item>
+          <widget class="QGroupBox" name="grp_tof">
+           <property name="title">
+            <string>ToF 图像</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_tof">
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_tof_ctrl">
+              <item>
+               <widget class="QLabel" name="label_tof_range">
+                <property name="text">
+                 <string>Range:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_tof_min">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_tof_sep">
+                <property name="text">
+                 <string>-</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="sb_tof_max">
+                <property name="maximum">
+                 <number>65535</number>
+                </property>
+                <property name="value">
+                 <number>255</number>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="GraphicsLayoutWidget" name="glw_tof"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item>
+          <widget class="QGroupBox" name="grp_hist_tof">
+           <property name="maximumSize">
+            <size>
+             <width>16777215</width>
+             <height>250</height>
+            </size>
+           </property>
+           <property name="title">
+            <string>ToF 统计直方图</string>
+           </property>
+           <layout class="QVBoxLayout" name="verticalLayout_hist_tof">
+            <item>
+             <widget class="PlotWidget" name="plot_hist_tof"/>
+            </item>
+           </layout>
+          </widget>
+         </item>
+        </layout>
+       </widget>
+      </widget>
+      <widget class="QWidget" name="widget_config_container">
+       <layout class="QVBoxLayout" name="verticalLayout_config_container">
+        <item>
+         <widget class="QTabWidget" name="tabWidget_config">
+          <property name="currentIndex">
+           <number>1</number>
+          </property>
+          <widget class="QWidget" name="tab_basic_config">
+           <attribute name="title">
+            <string>基础配置</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_basic_config">
+            <item>
+             <widget class="QGroupBox" name="grp_net">
+              <property name="title">
+               <string>网络配置</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_net">
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_ip">
+                 <item>
+                  <widget class="QLabel" name="label_ip">
+                   <property name="text">
+                    <string>IP:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QLineEdit" name="txt_ip">
+                   <property name="text">
+                    <string>0.0.0.0</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_port">
+                 <item>
+                  <widget class="QLabel" name="label_port">
+                   <property name="text">
+                    <string>Port:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_port">
+                   <property name="minimum">
+                    <number>1024</number>
+                   </property>
+                   <property name="maximum">
+                    <number>65535</number>
+                   </property>
+                   <property name="value">
+                    <number>10000</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QPushButton" name="btn_conn">
+                 <property name="text">
+                  <string>连接</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_rec">
+              <property name="title">
+               <string>数据录制</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_rec">
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_rec_path">
+                 <item>
+                  <widget class="QLineEdit" name="txt_rec_path">
+                   <property name="readOnly">
+                    <bool>true</bool>
+                   </property>
+                   <property name="placeholderText">
+                    <string>默认保存路径 (当前目录)</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QPushButton" name="btn_set_rec_path">
+                   <property name="maximumSize">
+                    <size>
+                     <width>30</width>
+                     <height>16777215</height>
+                    </size>
+                   </property>
+                   <property name="text">
+                    <string>...</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="lbl_rec_status">
+                 <property name="text">
+                  <string>状态: 空闲</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QPushButton" name="btn_rec">
+                 <property name="text">
+                  <string>开始录制</string>
+                 </property>
+                 <property name="checkable">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_play">
+              <property name="title">
+               <string>数据回放</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_play">
+               <item>
+                <widget class="QPushButton" name="btn_load">
+                 <property name="text">
+                  <string>加载文件...</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_play_ctrl">
+                 <item>
+                  <widget class="QPushButton" name="btn_play">
+                   <property name="enabled">
+                    <bool>false</bool>
+                   </property>
+                   <property name="text">
+                    <string>播放/暂停</string>
+                   </property>
+                   <property name="checkable">
+                    <bool>true</bool>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QLabel" name="lbl_play_status">
+                 <property name="text">
+                  <string>未加载文件</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_info">
+              <property name="title">
+               <string>像素信息</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_info">
+               <item>
+                <widget class="QLabel" name="lbl_pixel_info">
+                 <property name="text">
+                  <string>点击图像获取信息</string>
+                 </property>
+                 <property name="wordWrap">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <spacer name="verticalSpacer">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>40</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_algo">
+           <attribute name="title">
+            <string>算法设置</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_algo">
+            <item>
+             <widget class="QGroupBox" name="grp_denoise">
+              <property name="title">
+               <string>降噪算法 (Denoising)</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_2">
+               <item>
+                <widget class="QCheckBox" name="chk_dbscan">
+                 <property name="text">
+                  <string>DBSCAN 离群点去除 (Open3D)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout">
+                 <item>
+                  <widget class="QLabel" name="label">
+                   <property name="text">
+                    <string>半径 (Epsilon):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_dbscan_eps">
+                   <property name="decimals">
+                    <number>2</number>
+                   </property>
+                   <property name="singleStep">
+                    <double>0.010000000000000</double>
+                   </property>
+                   <property name="value">
+                    <double>3.000000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_2">
+                 <item>
+                  <widget class="QLabel" name="label_2">
+                   <property name="text">
+                    <string>最小点数 (Min Points):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_dbscan_min_points">
+                   <property name="value">
+                    <number>5</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="Line" name="line">
+                 <property name="orientation">
+                  <enum>Qt::Horizontal</enum>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QCheckBox" name="chk_range_gate">
+                 <property name="text">
+                  <string>距离选通 (Range Gating)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_3">
+                 <item>
+                  <widget class="QLabel" name="label_3">
+                   <property name="text">
+                    <string>范围 (Min-Max):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_range_min">
+                   <property name="maximum">
+                    <double>10000.000000000000000</double>
+                   </property>
+                   <property name="value">
+                    <double>0.100000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_4">
+                   <property name="text">
+                    <string>-</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_range_max">
+                   <property name="maximum">
+                    <double>10000.000000000000000</double>
+                   </property>
+                   <property name="value">
+                    <double>10.000000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="Line" name="line_2">
+                 <property name="orientation">
+                  <enum>Qt::Horizontal</enum>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QCheckBox" name="chk_intensity_filter">
+                 <property name="text">
+                  <string>强度过滤 (Intensity Filter)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_4">
+                 <item>
+                  <widget class="QLabel" name="label_5">
+                   <property name="text">
+                    <string>最小强度:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_min_intensity">
+                   <property name="maximum">
+                    <double>65535.000000000000000</double>
+                   </property>
+                   <property name="value">
+                    <double>10.000000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_completion">
+              <property name="title">
+               <string>补全算法 (Completion)</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_3">
+               <item>
+                <widget class="QRadioButton" name="rb_comp_none">
+                 <property name="text">
+                  <string>不补全 (None)</string>
+                 </property>
+                 <property name="checked">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_comp_conn">
+                 <property name="text">
+                  <string>基于连通域 (Connected Components)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_5">
+                 <item>
+                  <widget class="QLabel" name="label_6">
+                   <property name="text">
+                    <string>最大孔洞 (Max Hole Size):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_hole_size">
+                   <property name="value">
+                    <number>16</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_comp_morph">
+                 <property name="text">
+                  <string>基于形态学 (Morphological)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_6">
+                 <item>
+                  <widget class="QLabel" name="label_7">
+                   <property name="text">
+                    <string>核大小 (Kernel Size):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_morph_kernel">
+                   <property name="value">
+                    <number>3</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QCheckBox" name="chk_apply_realtime">
+              <property name="text">
+               <string>实时应用 (Apply to Real-time Display)</string>
+              </property>
+              <property name="checked">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="verticalSpacer_2">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>40</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_offline">
+           <attribute name="title">
+            <string>离线分析</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_offline">
+            <item>
+             <widget class="QGroupBox" name="grp_offline_algo">
+              <property name="title">
+               <string>重建算法 (Reconstruction)</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_4">
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_spatial">
+                 <item>
+                  <widget class="QCheckBox" name="chk_spatial_corr">
+                   <property name="text">
+                    <string>空间相关 (Spatial Correlation)</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <spacer name="horizontalSpacer_spatial">
+                   <property name="orientation">
+                    <enum>Qt::Horizontal</enum>
+                   </property>
+                   <property name="sizeHint" stdset="0">
+                    <size>
+                     <width>20</width>
+                     <height>20</height>
+                    </size>
+                   </property>
+                  </spacer>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_spatial_kernel">
+                   <property name="text">
+                    <string>邻域 (Kernel):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_spatial_kernel">
+                   <property name="minimum">
+                    <number>1</number>
+                   </property>
+                   <property name="singleStep">
+                    <number>2</number>
+                   </property>
+                   <property name="value">
+                    <number>3</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_offline_peak">
+                 <property name="text">
+                  <string>峰值法 (Peak Detection)</string>
+                 </property>
+                 <property name="checked">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_offline_matched">
+                 <property name="text">
+                  <string>匹配滤波法 (Matched Filter)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_7">
+                 <item>
+                  <spacer name="horizontalSpacer_2">
+                   <property name="orientation">
+                    <enum>Qt::Horizontal</enum>
+                   </property>
+                   <property name="sizeHint" stdset="0">
+                    <size>
+                     <width>20</width>
+                     <height>20</height>
+                    </size>
+                   </property>
+                  </spacer>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_8">
+                   <property name="text">
+                    <string>激光脉宽 (Pulse Width):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_matched_width">
+                   <property name="value">
+                    <number>6</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item>
+                <widget class="QRadioButton" name="rb_offline_derivative">
+                 <property name="text">
+                  <string>导数法 (Derivative)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_8">
+                 <item>
+                  <spacer name="horizontalSpacer_3">
+                   <property name="orientation">
+                    <enum>Qt::Horizontal</enum>
+                   </property>
+                   <property name="sizeHint" stdset="0">
+                    <size>
+                     <width>20</width>
+                     <height>20</height>
+                    </size>
+                   </property>
+                  </spacer>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_9">
+                   <property name="text">
+                    <string>步长 (Step):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_deriv_step">
+                   <property name="value">
+                    <number>8</number>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="label_10">
+                   <property name="text">
+                    <string>阈值 (Threshold):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QDoubleSpinBox" name="sb_deriv_thresh">
+                   <property name="value">
+                    <double>3.000000000000000</double>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QProgressBar" name="progress_reconstruct">
+              <property name="value">
+               <number>0</number>
+              </property>
+              <property name="textVisible">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="btn_reconstruct">
+              <property name="text">
+               <string>开始离线重建</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="verticalSpacer_3">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>40</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </widget>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>GraphicsLayoutWidget</class>
+   <extends>QGraphicsView</extends>
+   <header>pyqtgraph</header>
+  </customwidget>
+  <customwidget>
+   <class>PlotWidget</class>
+   <extends>QGraphicsView</extends>
+   <header>pyqtgraph</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
+
+
+==================================================
+File: ui\__init__.py
+==================================================
+
+
+
+==================================================
+File: ui\widgets\__init__.py
+==================================================
+
+
+
+==================================================
+File: utils\colormaps.py
+==================================================
+
+import numpy as np
+import pyqtgraph as pg
+
+def register_custom_cmaps():
+    """
+    Register 'jet' colormap if not available in pyqtgraph.
+    Uses matplotlib to generate the lookup table.
+    """
+    if 'jet' in pg.colormap.listMaps():
+        return
+
+    try:
+        import matplotlib.cm
+        
+        # Get 'jet' colormap from matplotlib
+        cmap = matplotlib.cm.get_cmap('jet')
+        
+        # Generate lookup table (256 colors)
+        # matplotlib returns RGBA in 0-1 range
+        lut = cmap(np.linspace(0, 1, 256))
+        
+        # Convert to 0-255 uint8
+        lut = (lut * 255).astype(np.uint8)
+        
+        # Register with pyqtgraph
+        # pg.ColorMap takes (pos, color)
+        # Or we can just add it directly if we have the object.
+        # Wait, pg.colormap.add takes a ColorMap object.
+        
+        # Create ColorMap object from lookup table
+        # We need positions for the colors.
+        pos = np.linspace(0, 1, 256)
+        colors = lut
+        
+        # pg.ColorMap(pos, color) expects color as (R,G,B,A) usually.
+        # But 'lut' is (256, 4).
+        
+        # Let's use simpler approach: Just add it to the global dict if possible?
+        # pg.colormap.register(name, colormap) in newer versions?
+        # In older versions, it might be tricky.
+        
+        # Let's construct a ColorMap and add it.
+        cm = pg.ColorMap(pos, colors)
+        
+        # Add to global list?
+        # pg.graphicsItems.GradientEditorItem.Gradients is a dict of definitions.
+        # But pg.colormap.get() uses a different registry.
+        
+        # Actually, let's just make sure we can get it.
+        # There isn't a simple 'register' function in older pyqtgraph versions that works globally for 'get'.
+        # However, we can use a trick: 
+        # But wait, if I use pg.colormap.get('jet'), it looks in some internal list.
+        
+        # Let's check if there is a way to add to the list.
+        # Standard way: pg.colormap.register(name, source) isn't standard.
+        
+        # Alternative: Return the colormap object and use it directly.
+        pass
+    except ImportError:
+        print("Warning: Matplotlib not found, 'jet' colormap unavailable.")
+    except Exception as e:
+        print(f"Error registering 'jet': {e}")
+
+def get_colormap(name):
+    """
+    Safe wrapper for pg.colormap.get
+    """
+    try:
+        return pg.colormap.get(name)
+    except Exception:
+        # Fallback for 'jet'
+        if name == 'jet':
+            try:
+                import matplotlib.cm
+                cmap = matplotlib.cm.get_cmap('jet')
+                lut = cmap(np.linspace(0, 1, 256))
+                lut = (lut * 255).astype(np.uint8)
+                pos = np.linspace(0, 1, 256)
+                return pg.ColorMap(pos, lut)
+            except:
+                print("Fallback: Using viridis instead of jet")
+                return pg.colormap.get('viridis')
+        return pg.colormap.get('viridis')
+
+
+==================================================
+File: utils\simulator.py
+==================================================
+
+import socket
+import struct
+import time
+import numpy as np
+import threading
+
+# Configuration
+TARGET_IP = "127.0.0.1"
+TARGET_PORT = 5005
+IMG_WIDTH = 128
+IMG_HEIGHT = 128
+PIXEL_COUNT = IMG_WIDTH * IMG_HEIGHT
+BYTES_PER_PIXEL = 4 # 2 bytes Range + 2 bytes Intensity
+FRAME_SIZE = PIXEL_COUNT * BYTES_PER_PIXEL # 65536 bytes
+FRAGMENT_SIZE = 4096
+FRAGMENTS_PER_FRAME = FRAME_SIZE // FRAGMENT_SIZE # 16
+
+class UdpSimulator:
+    def __init__(self, ip=TARGET_IP, port=TARGET_PORT):
+        self.ip = ip
+        self.port = port
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.running = False
+        self.task_id_counter = 0
+
+    def start(self, mode='int_rng', interval=0.02):
+        self.running = True
+        print(f"Simulator started. Sending to {self.ip}:{self.port} (Mode: {mode})")
+        
+        t = 0
+        while self.running:
+            try:
+                t += 0.1
+                self.task_id_counter = (self.task_id_counter + 1) % 0xFFFFFF
+                
+                # 1. Generate Frame Data (65536 bytes)
+                if mode == 'int_rng':
+                    # Pattern: Moving sine wave
+                    x = np.linspace(0, 10, IMG_WIDTH)
+                    y = np.linspace(0, 10, IMG_HEIGHT)
+                    X, Y = np.meshgrid(x, y)
+                    
+                    # Range (Real value 0-50m -> Raw 0-500)
+                    rng_real = (np.sin(X + t) + 1) * 25 # 0-50
+                    rng_raw = (rng_real * 10).astype(np.uint16)
+                    
+                    # Intensity (0-200)
+                    intensity = ((np.cos(Y - t) + 1) * 100).astype(np.uint16)
+                    
+                    # Interleave: [R, I, R, I...]
+                    # Flatten
+                    rng_flat = rng_raw.flatten()
+                    int_flat = intensity.flatten()
+                    
+                    # Stack and reshape to (N, 2) then flatten to interleave
+                    interleaved = np.stack((rng_flat, int_flat), axis=1).flatten()
+                    
+                    # Convert to bytes (Little Endian <H)
+                    # Note: Protocol didn't specify endianness of data, assuming Little Endian for standard PC/ARM
+                    payload_bytes = interleaved.astype('<u2').tobytes()
+                    task_type = 0
+                    
+                else: # ToF
+                    # Generate 1 frame of 128x128, each pixel uint16 in range [0, 8000]
+                    # Total: 128 * 128 * 2 bytes = 32768 bytes
+                    tof_frame = np.random.randint(0, 8001, (IMG_HEIGHT, IMG_WIDTH), dtype=np.uint16)
+                    payload_bytes = tof_frame.astype('<u2').tobytes()
+                    task_type = 1
+
+                # 2. Fragment and Send
+                total_fragments = len(payload_bytes) // FRAGMENT_SIZE
+                
+                for seq in range(total_fragments):
+                    # Slice data
+                    start_idx = seq * FRAGMENT_SIZE
+                    end_idx = start_idx + FRAGMENT_SIZE
+                    chunk = payload_bytes[start_idx:end_idx]
+                    
+                    # Construct Packet
+                    # Header: 0xAA55 (Big Endian: \xAA\x55)
+                    header = b'\xAA\x55'
+                    
+                    # Control: D15=1 (Fragment), Length=4096 (0x1000) -> 0x9000
+                    # Big Endian
+                    ctrl = struct.pack('>H', 0x9000)
+                    
+                    # Task ID: 3 bytes (Big Endian-ish)
+                    # struct doesn't support 3 bytes, pack manually
+                    tid_bytes = struct.pack('>I', self.task_id_counter)[1:4]
+                    
+                    # Type: 1 byte
+                    type_byte = struct.pack('B', task_type)
+                    
+                    # Seq: 1 byte
+                    seq_byte = struct.pack('B', seq)
+                    
+                    # Data: chunk (4096 bytes)
+                    
+                    # FCS: XOR Checksum of data
+                    fcs = 0
+                    for b in chunk:
+                        fcs ^= b
+                    fcs_byte = struct.pack('B', fcs)
+                    
+                    # End: 0x55AA (Big Endian: \x55\xAA)
+                    tail = b'\x55\xAA'
+                    
+                    packet = header + ctrl + tid_bytes + type_byte + seq_byte + chunk + fcs_byte + tail
+                    
+                    self.sock.sendto(packet, (self.ip, self.port))
+                    
+                    # Small sleep between packets to avoid buffer overflow on receiver?
+                    # time.sleep(0.0001) 
+
+                time.sleep(interval) # 50Hz = 0.02s
+                
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                print(f"Error: {e}")
+                time.sleep(1)
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="UDP Simulator")
+    parser.add_argument("--mode", choices=["int_rng", "tof"], default="int_rng", help="Simulation mode (int_rng or tof)")
+    parser.add_argument("--rate", type=float, default=0.02, help="Packet interval in seconds (default 0.02 = 50Hz)")
+    
+    args, unknown = parser.parse_known_args() # Use parse_known_args in case no args
+
+    sim = UdpSimulator()
+    print(f"Starting {args.mode} Simulator @ {1/args.rate:.1f} Hz")
+    try:
+        sim.start(mode=args.mode, interval=args.rate)
+    except KeyboardInterrupt:
+        print("Stopped.")
+
+
+==================================================
+File: utils\start_intensity_simulator.py
+==================================================
+
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils.simulator import UdpSimulator
+
+if __name__ == "__main__":
+    print("Starting Intensity/Range Simulator...")
+    sim = UdpSimulator()
+    try:
+        sim.start(mode='int_rng', interval=0.02)
+    except KeyboardInterrupt:
+        print("Simulator stopped.")
+
+
+==================================================
+File: utils\start_tof_simulator.py
+==================================================
+
+import sys
+import os
+
+# Add parent directory to path to find utils.simulator
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils.simulator import UdpSimulator
+
+if __name__ == "__main__":
+    print("Starting ToF (Time of Flight) Simulator...")
+    sim = UdpSimulator()
+    try:
+        sim.start(mode='tof', interval=0.02)
+    except KeyboardInterrupt:
+        print("Simulator stopped.")
+
+
+==================================================
+File: utils\theme.py
+==================================================
+
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QPalette, QColor
+
+def apply_dark_theme(app):
+    """
+    Apply a dark theme using the Fusion style and custom palette.
+    This mimics a modern Linux desktop look (e.g., KDE Breeze Dark, Adwaita Dark).
+    """
+    app.setStyle("Fusion")
+    
+    dark_palette = QPalette()
+    
+    # Base colors
+    color_dark_bg = QColor(45, 45, 45)
+    color_darker_bg = QColor(35, 35, 35)
+    color_text = QColor(220, 220, 220)
+    color_highlight = QColor(42, 130, 218) # Ubuntu/Adwaita Blue-ish
+    color_red = QColor(255, 100, 100)
+    
+    dark_palette.setColor(QPalette.Window, color_dark_bg)
+    dark_palette.setColor(QPalette.WindowText, color_text)
+    dark_palette.setColor(QPalette.Base, color_darker_bg)
+    dark_palette.setColor(QPalette.AlternateBase, color_dark_bg)
+    dark_palette.setColor(QPalette.ToolTipBase, color_text)
+    dark_palette.setColor(QPalette.ToolTipText, color_text)
+    dark_palette.setColor(QPalette.Text, color_text)
+    dark_palette.setColor(QPalette.Button, color_dark_bg)
+    dark_palette.setColor(QPalette.ButtonText, color_text)
+    dark_palette.setColor(QPalette.BrightText, color_red)
+    dark_palette.setColor(QPalette.Link, color_highlight)
+    dark_palette.setColor(QPalette.Highlight, color_highlight)
+    dark_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+    
+    # Disabled state
+    dark_palette.setColor(QPalette.Disabled, QPalette.Text, QColor(127, 127, 127))
+    dark_palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(127, 127, 127))
+
+    app.setPalette(dark_palette)
+    
+    # Additional Stylesheet tweaks for specific widgets
+    # Clean up GroupBox borders, Tab styling, and Input fields
+    app.setStyleSheet("""
+        QToolTip { 
+            color: #ffffff; 
+            background-color: #2a82da; 
+            border: 1px solid white; 
+        }
+        QMainWindow {
+            background-color: #2d2d2d;
+        }
+        QGroupBox {
+            border: 1px solid #555555;
+            border-radius: 5px;
+            margin-top: 20px;
+            font-weight: bold;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            padding: 0 5px;
+            color: #aaaaaa;
+        }
+        QTabWidget::pane { 
+            border: 1px solid #555555; 
+            background-color: #2d2d2d;
+        }
+        QTabBar::tab {
+            background: #353535;
+            color: #aaaaaa;
+            padding: 8px 12px;
+            border: 1px solid #444444;
+            border-bottom-color: #555555; /* Same as pane border */
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+        }
+        QTabBar::tab:selected {
+            background: #454545;
+            color: #ffffff;
+            border-bottom-color: #454545; /* Blend with pane */
+        }
+        QTabBar::tab:hover {
+            background: #3a3a3a;
+        }
+        QLineEdit, QSpinBox, QComboBox {
+            background-color: #1e1e1e;
+            color: #dddddd;
+            border: 1px solid #555555;
+            padding: 4px;
+            border-radius: 3px;
+        }
+        QPushButton {
+            background-color: #3a3a3a;
+            color: #dddddd;
+            border: 1px solid #555555;
+            padding: 6px 12px;
+            border-radius: 4px;
+        }
+        QPushButton:hover {
+            background-color: #454545;
+            border-color: #2a82da;
+        }
+        QPushButton:pressed {
+            background-color: #2a82da;
+            color: white;
+        }
+        QPushButton:checked {
+            background-color: #2a82da;
+            color: white;
+            border: 1px solid #2a82da;
+        }
+        QSplitter::handle {
+            background-color: #444444;
+        }
+        QProgressBar {
+            border: 1px solid #555555;
+            border-radius: 3px;
+            text-align: center;
+            background-color: #1e1e1e;
+        }
+        QProgressBar::chunk {
+            background-color: #2a82da;
+            width: 10px; 
+            margin: 0.5px;
+        }
+        QCheckBox {
+            spacing: 5px;
+            color: #dddddd;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+        }
+    """)
+
+
+==================================================
+File: utils\__init__.py
+==================================================
+
+
+

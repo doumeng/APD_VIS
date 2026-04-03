@@ -4,6 +4,7 @@ import os
 import struct
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 from core.parser import DataParser
+import numpy as np
 
 # Frame Sizes (in bytes)
 FRAME_SIZE_DEPTH = 65536  # 128x128 * 2 (Int) + 128x128 * 2 (Rng) = 65536
@@ -107,7 +108,8 @@ class PlaybackManager(QObject):
         # Parse based on Type
         if self.data_type == 0: # Depth (Int + Rng)
             intensity, rng = DataParser.parse_intensity_range(data)
-            self.sig_update_int_rng.emit(intensity, rng)
+            # self.sig_update_int_rng.emit(intensity, rng)
+            self.sig_update_int_rng.emit(np.flipud(intensity, 1), np.flipud(rng, 1)) # Rotate 90 degrees clockwise for correct orientation
         elif self.data_type == 1: # ToF
             tof = DataParser.parse_tof(data)
             self.sig_update_tof.emit(tof)

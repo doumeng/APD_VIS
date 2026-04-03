@@ -19,8 +19,8 @@ class ImageProcessor:
         self.settings = {
             # Denoising
             'dbscan_enabled': False,
-            'dbscan_eps': 0.05,
-            'dbscan_min_points': 10,
+            'dbscan_eps': 3,
+            'dbscan_min_points': 5,
             
             'range_gate_enabled': False,
             'range_min': 0.1,
@@ -31,7 +31,7 @@ class ImageProcessor:
             
             # Completion
             'completion_mode': 'none', # 'none', 'connected', 'morphological'
-            'hole_size': 50,
+            'hole_size': 16,
             'morph_kernel': 3,
             
             'enabled': True
@@ -181,7 +181,12 @@ class ImageProcessor:
         elif mode == 'morphological':
             k_size = int(self.settings['morph_kernel'])
             kernel = np.ones((k_size, k_size), np.uint8)
+            kernel_one = np.ones((1, 1), np.uint8)
             
+            # 先腐蚀再膨胀
+            # proc_rng = cv2.erode(proc_rng, kernel, iterations=1, dst=proc_rng)
+            # proc_int = cv2.erode(proc_int, kernel, iterations=1, dst=proc_int)
+
             # Dilate to fill holes
             dilated_rng = cv2.dilate(proc_rng, kernel, iterations=1)
             dilated_int = cv2.dilate(proc_int, kernel, iterations=1)

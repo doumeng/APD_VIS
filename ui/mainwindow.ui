@@ -239,7 +239,7 @@
         <item>
          <widget class="QTabWidget" name="tabWidget_config">
           <property name="currentIndex">
-           <number>0</number>
+           <number>3</number>
           </property>
           <widget class="QWidget" name="tab_basic_config">
            <attribute name="title">
@@ -467,7 +467,7 @@
                     <double>0.010000000000000</double>
                    </property>
                    <property name="value">
-                    <double>0.050000000000000</double>
+                    <double>3.000000000000000</double>
                    </property>
                   </widget>
                  </item>
@@ -485,7 +485,7 @@
                  <item>
                   <widget class="QSpinBox" name="sb_dbscan_min_points">
                    <property name="value">
-                    <number>10</number>
+                    <number>5</number>
                    </property>
                   </widget>
                  </item>
@@ -616,7 +616,7 @@
                  <item>
                   <widget class="QSpinBox" name="sb_hole_size">
                    <property name="value">
-                    <number>50</number>
+                    <number>16</number>
                    </property>
                   </widget>
                  </item>
@@ -772,7 +772,7 @@
                  <item>
                   <widget class="QSpinBox" name="sb_matched_width">
                    <property name="value">
-                    <number>10</number>
+                    <number>6</number>
                    </property>
                   </widget>
                  </item>
@@ -810,7 +810,7 @@
                  <item>
                   <widget class="QSpinBox" name="sb_deriv_step">
                    <property name="value">
-                    <number>1</number>
+                    <number>8</number>
                    </property>
                   </widget>
                  </item>
@@ -824,7 +824,7 @@
                  <item>
                   <widget class="QDoubleSpinBox" name="sb_deriv_thresh">
                    <property name="value">
-                    <double>1.000000000000000</double>
+                    <double>3.000000000000000</double>
                    </property>
                   </widget>
                  </item>
@@ -852,6 +852,407 @@
             </item>
             <item>
              <spacer name="verticalSpacer_3">
+              <property name="orientation">
+               <enum>Qt::Vertical</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>40</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_serial">
+           <attribute name="title">
+            <string>串口控制</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_serial">
+            <item>
+             <widget class="QGroupBox" name="grp_serial_conn">
+              <property name="title">
+               <string>串口连接</string>
+              </property>
+              <layout class="QHBoxLayout" name="horizontalLayout_serial_conn">
+               <item>
+                <widget class="QLabel" name="label_11">
+                 <property name="text">
+                  <string>端口:</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QComboBox" name="combo_port"/>
+               </item>
+               <item>
+                <widget class="QLabel" name="label_12">
+                 <property name="text">
+                  <string>波特率:</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QComboBox" name="combo_baud">
+                 <property name="currentIndex">
+                  <number>4</number>
+                 </property>
+                 <item>
+                  <property name="text">
+                   <string>9600</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string>19200</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string>38400</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string>57600</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string>115200</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string>230400</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string>460800</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string>921600</string>
+                  </property>
+                 </item>
+                </widget>
+               </item>
+               <item>
+                <widget class="QPushButton" name="btn_serial_open">
+                 <property name="text">
+                  <string>打开串口</string>
+                 </property>
+                 <property name="checkable">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_serial_cmds">
+              <property name="title">
+               <string>指令发送</string>
+              </property>
+              <layout class="QGridLayout" name="gridLayout_serial_cmds">
+               <item row="0" column="0">
+                <widget class="QPushButton" name="btn_cmd_read_id">
+                 <property name="text">
+                  <string>读取组件编号 (0xC1)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="1">
+                <widget class="QLabel" name="lbl_id_result">
+                 <property name="text">
+                  <string>ID: Unknown</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <widget class="QPushButton" name="btn_cmd_cooler_on">
+                 <property name="text">
+                  <string>制冷机上电 (0xC2)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="2" column="0">
+                <widget class="QPushButton" name="btn_cmd_set_temp">
+                 <property name="text">
+                  <string>设置温度 (0xC3)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="2" column="1">
+                <widget class="QLineEdit" name="txt_set_temp">
+                 <property name="placeholderText">
+                  <string>223-253 K</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="3" column="0">
+                <widget class="QPushButton" name="btn_cmd_apd_config">
+                 <property name="text">
+                  <string>APD配置 (0xC4)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="3" column="1">
+                <layout class="QHBoxLayout" name="horz_apd_config_inner">
+                 <item>
+                  <widget class="QCheckBox" name="chk_apd_trig">
+                   <property name="text">
+                    <string>内触发</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QCheckBox" name="chk_apd_test_point">
+                   <property name="text">
+                    <string>测试点</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QCheckBox" name="chk_apd_test_mode">
+                   <property name="text">
+                    <string>测试模式</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item row="4" column="0">
+                <widget class="QPushButton" name="btn_cmd_algo_config">
+                 <property name="text">
+                  <string>算法配置 (0xC5)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="4" column="1">
+                <layout class="QGridLayout" name="grid_algo_config_inner">
+                 <item row="0" column="0">
+                  <widget class="QLabel" name="l_algo_1">
+                   <property name="text">
+                    <string>帧数:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="1">
+                  <widget class="QSpinBox" name="sb_algo_frames"/>
+                 </item>
+                 <item row="0" column="2">
+                  <widget class="QLabel" name="l_algo_2">
+                   <property name="text">
+                    <string>降噪:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="3">
+                  <widget class="QSpinBox" name="sb_algo_noise"/>
+                 </item>
+                 <item row="0" column="4">
+                  <widget class="QLabel" name="l_algo_3">
+                   <property name="text">
+                    <string>步长:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="0" column="5">
+                  <widget class="QSpinBox" name="sb_algo_step"/>
+                 </item>
+                 <item row="1" column="0">
+                  <widget class="QLabel" name="l_algo_4">
+                   <property name="text">
+                    <string>阈值:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="1">
+                  <widget class="QSpinBox" name="sb_algo_thresh"/>
+                 </item>
+                 <item row="1" column="2">
+                  <widget class="QLabel" name="l_algo_kernel">
+                   <property name="text">
+                    <string>Kernel:</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item row="1" column="3">
+                  <widget class="QSpinBox" name="sb_algo_kernel"/>
+                 </item>
+                </layout>
+               </item>
+               <item row="5" column="0">
+                <widget class="QPushButton" name="btn_cmd_proj_info">
+                 <property name="text">
+                  <string>弹体信息 (0xC6)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="5" column="1">
+                <layout class="QHBoxLayout" name="horz_proj_info_inner">
+                 <item>
+                  <widget class="QLabel" name="l_proj_1">
+                   <property name="text">
+                    <string>距离(m):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_proj_dist">
+                   <property name="maximum">
+                    <number>10000</number>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QLabel" name="l_proj_2">
+                   <property name="text">
+                    <string>速度(m/s):</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QSpinBox" name="sb_proj_vel">
+                   <property name="maximum">
+                    <number>2000</number>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item row="6" column="0">
+                <widget class="QPushButton" name="btn_cmd_apd_on">
+                 <property name="text">
+                  <string>探测器上电 (0xC7)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="7" column="0">
+                <widget class="QPushButton" name="btn_cmd_apd_off">
+                 <property name="text">
+                  <string>探测器下电 (0xC8)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="8" column="0">
+                <widget class="QPushButton" name="btn_cmd_cooler_off">
+                 <property name="text">
+                  <string>制冷机下电 (0xC9)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="9" column="0">
+                <widget class="QPushButton" name="btn_cmd_set_bias">
+                 <property name="text">
+                  <string>设置偏压 (0xCA)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="9" column="1">
+                <widget class="QLineEdit" name="txt_set_bias">
+                 <property name="placeholderText">
+                  <string>10-67.5 V</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_serial_recv">
+              <property name="title">
+               <string>指令接收</string>
+              </property>
+              <layout class="QGridLayout" name="gridLayout_serial_recv">
+               <item row="0" column="0">
+                <widget class="QLabel" name="label_recv_cmd">
+                 <property name="text">
+                  <string>指令类型:</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="1">
+                <widget class="QLabel" name="lbl_recv_cmd_type">
+                 <property name="styleSheet">
+                  <string>font-weight: bold; color: #4CAF50;</string>
+                 </property>
+                 <property name="text">
+                  <string>--</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="2">
+                <widget class="QLabel" name="label_recv_res">
+                 <property name="text">
+                  <string>指令结果:</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="3">
+                <widget class="QLabel" name="lbl_recv_result">
+                 <property name="styleSheet">
+                  <string>font-weight: bold;</string>
+                 </property>
+                 <property name="text">
+                  <string>--</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <widget class="QLabel" name="label_recv_temp">
+                 <property name="text">
+                  <string>当前温度:</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="1">
+                <widget class="QLabel" name="lbl_recv_temp">
+                 <property name="text">
+                  <string>-- K</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="2">
+                <widget class="QLabel" name="label_recv_volt">
+                 <property name="text">
+                  <string>当前电压:</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="3">
+                <widget class="QLabel" name="lbl_recv_volt">
+                 <property name="text">
+                  <string>-- V</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_serial_log">
+              <property name="title">
+               <string>串口日志</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_serial_log">
+               <item>
+                <widget class="QTextEdit" name="txt_serial_log">
+                 <property name="readOnly">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <spacer name="verticalSpacer_serial">
               <property name="orientation">
                <enum>Qt::Vertical</enum>
               </property>

@@ -8,19 +8,26 @@ from collections import defaultdict
 import struct
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QSpinBox, QPushButton, QCheckBox, QGroupBox, QTabWidget, QSplitter, QFileDialog
+from PyQt5.QtGui import QDoubleValidator, QIcon
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
 from PyQt5 import uic
 import pyqtgraph as pg
 
+import serial.tools.list_ports
 from core.parser import DataParser
 from core.receiver import UdpReceiver
 from core.recorder import DataRecorder
 from core.playback import PlaybackManager
 from core.reconstructor import Reconstructor
 from core.processor import ImageProcessor
+from core.serial_protocol import SerialWorker
 from utils.theme import apply_dark_theme
 from utils.colormaps import get_colormap
 import config
+
+def resource_path(relative_path):
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
 
 # =============================================================================
 # Main Window
@@ -32,6 +39,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("单光子激光雷达上位机 v3.0")
+        self.setWindowIcon(QIcon(resource_path("icon.webp")))
         # self.resize(2000, 900)
         
         self.receiver = None
@@ -53,7 +61,7 @@ class MainWindow(QMainWindow):
         self.sig_update_tof.connect(self.update_display_tof)
         
         # Initialize Algorithm Settings Logic
-        self.init_algo_settings()
+        # self.init_algo_settings()
 
         # Playback Signals
         self.playback.sig_update_int_rng.connect(self.update_display_int_rng)
@@ -66,6 +74,10 @@ class MainWindow(QMainWindow):
         self.status_timer.timeout.connect(self.update_status)
         self.status_timer.start(1000)
 
+        # Initialize Serial Logic
+        self.serial_worker = SerialWorker()
+        self.init_serial_logic()
+
     def closeEvent(self, event):
         if self.receiver:
             self.receiver.stop()
@@ -73,18 +85,256 @@ class MainWindow(QMainWindow):
             self.recorder.close()
         if self.playback:
             self.playback.close()
+        if self.serial_worker:
+            self.serial_worker.close_port()
         event.accept()
+
+    def init_serial_logic(self):
+        # connect worker signals
+        self.serial_worker.sig_received_frame.connect(self.on_serial_frame)
+        self.serial_worker.sig_log.connect(self.log_serial)
+        self.serial_worker.sig_status_update.connect(lambda msg: self.statusBar().showMessage(msg, 3000))
+        
+        # UI connections
+        self.btn_serial_open.clicked.connect(self.toggle_serial)
+        self.combo_port.showPopup = self.refresh_ports # Refresh on click
+        self.refresh_ports()
+        
+        # Commands
+        self.btn_cmd_read_id.clicked.connect(lambda: self.serial_worker.send_command(0xC1))
+        self.btn_cmd_cooler_on.clicked.connect(lambda: self.serial_worker.send_command(0xC2))
+        self.btn_cmd_cooler_off.clicked.connect(lambda: self.serial_worker.send_command(0xC9))
+        self.btn_cmd_apd_on.clicked.connect(lambda: self.serial_worker.send_command(0xC7))
+        self.btn_cmd_apd_off.clicked.connect(lambda: self.serial_worker.send_command(0xC8))
+        self.btn_cmd_apd_config.clicked.connect(self.send_apd_config_cmd)
+        
+        # Temp 0xC3
+        self.btn_cmd_set_temp.clicked.connect(self.send_temp_cmd)
+        
+        # Bias 0xCA
+        self.btn_cmd_set_bias.clicked.connect(self.send_bias_cmd)
+        
+        # Algo Config 0xC5
+        if hasattr(self, 'btn_cmd_algo_config'):
+             self.btn_cmd_algo_config.clicked.connect(self.send_algo_cmd)
+        
+        # Projectile 0xC6
+        if hasattr(self, 'btn_cmd_proj_info'):
+             self.btn_cmd_proj_info.clicked.connect(self.send_proj_cmd)
+             
+        # Initialize Validators for Manual Inputs
+        if hasattr(self, 'txt_set_temp'):
+            # Temp: 223 - 253, 1 decimal place? (0.1K)
+            val_temp = QDoubleValidator(223.0, 253.0, 1, self)
+            val_temp.setNotation(QDoubleValidator.StandardNotation)
+            self.txt_set_temp.setValidator(val_temp)
+            self.txt_set_temp.setPlaceholderText("223-253")
+            
+        if hasattr(self, 'txt_set_bias'):
+            # Bias: 10 - 63.5, 1 decimal place?
+            val_bias = QDoubleValidator(10.0, 63.5, 1, self)
+            val_bias.setNotation(QDoubleValidator.StandardNotation)
+            self.txt_set_bias.setValidator(val_bias)
+            self.txt_set_bias.setPlaceholderText("10-63.5")
+
+    def refresh_ports(self):
+        self.combo_port.clear()
+        ports = serial.tools.list_ports.comports()
+        for p in ports:
+            self.combo_port.addItem(f"{p.device}")
+        
+        # Restore default showPopup
+        # self.combo_port.showPopup = QtWidgets.QComboBox.showPopup(self.combo_port) # Tricky in Python
+
+    def toggle_serial(self):
+        if self.serial_worker.running:
+            self.serial_worker.close_port()
+            self.btn_serial_open.setText("打开串口")
+            self.btn_serial_open.setChecked(False)
+        else:
+            port = self.combo_port.currentText().split(' ')[0]
+            if not port:
+                return
+            
+            # Read baud from combo
+            try:
+                baud = int(self.combo_baud.currentText())
+            except ValueError:
+                baud = 115200 # Default fallback
+            
+            if self.serial_worker.open_port(port, baud):
+                self.btn_serial_open.setText("关闭串口")
+                self.btn_serial_open.setChecked(True)
+            else:
+                self.btn_serial_open.setChecked(False)
+
+    def send_temp_cmd(self):
+        # 0xC3, 12/13 bytes = temp * 10
+        # Validate Input (223K - 253K)
+        txt = self.txt_set_temp.text().strip()
+        try:
+            temp_k = float(txt)
+        except ValueError:
+            self.statusBar().showMessage("Error: Temperature must be a number", 3000)
+            return
+
+        if not (223 <= temp_k <= 253):
+            self.statusBar().showMessage("Error: Temperature must be between 223K and 253K", 3000)
+            return
+
+        val = int(temp_k * 10)
+        d_high = (val >> 8) & 0xFF
+        d_low = val & 0xFF
+        # Protocol Table 3-26 says: Low byte (12), High byte (13)
+        self.serial_worker.send_command(0xC3, d_low, d_high)
+        self.statusBar().showMessage(f"Sent Temp: {temp_k}K", 3000)
+
+    def send_bias_cmd(self):
+        # 0xCA, 12=Int, 13=Dec
+        # Validate Input (10V - 63.5V)
+        txt = self.txt_set_bias.text().strip()
+        try:
+            val = float(txt)
+        except ValueError:
+            self.statusBar().showMessage("Error: Voltage must be a number", 3000)
+            return
+
+        if not (10 <= val <= 67.5):
+            self.statusBar().showMessage("Error: Voltage must be between 10V and 67.5V", 3000)
+            return
+
+        v_int = int(val)
+        v_dec = int(round((val - v_int) * 10))
+        self.serial_worker.send_command(0xCA, v_int, v_dec)
+        self.statusBar().showMessage(f"Sent Bias: {val}V", 3000)
+
+    def send_algo_cmd(self):
+        # 0xC5
+        # 12 Low 4: Frames
+        # 12 High 4: Noise
+        # 13 Low 4: Step
+        # 13 High 4: Threshold
+        # 14: Kernel Size
+        f = self.sb_algo_frames.value() & 0x0F
+        n = self.sb_algo_noise.value() & 0x0F
+        s = self.sb_algo_step.value() & 0x0F
+        t = self.sb_algo_thresh.value() & 0x0F
+        k = self.sb_algo_kernel.value() & 0xFF
+        
+        b12 = (n << 4) | f
+        b13 = (t << 4) | s
+        self.serial_worker.send_command(0xC5, b12, b13, k)
+
+    def send_proj_cmd(self):
+        # 0xC6
+        # D0-15 Dist (12,13) - Low, High
+        # D0-15 Vel (14,15) - Low, High
+        dist = int(self.sb_proj_dist.value())
+        vel = int(self.sb_proj_vel.value())
+        
+        d_low = dist & 0xFF
+        d_high = (dist >> 8) & 0xFF
+        
+        v_low = vel & 0xFF
+        v_high = (vel >> 8) & 0xFF
+        
+        self.serial_worker.send_command(0xC6, d_low, d_high,  v_low, v_high)
+
+    def send_apd_config_cmd(self):
+        # 0xC4
+        # D0: Trig (1=Checked)
+        # D1: Test Point (1=Checked)
+        # D2: Test Mode (1=Checked)
+        val = 0
+        if self.chk_apd_trig.isChecked():
+            val |= (1 << 0)
+        if self.chk_apd_test_point.isChecked():
+            val |= (1 << 1)
+        if self.chk_apd_test_mode.isChecked():
+            val |= (1 << 2)
+            
+        self.serial_worker.send_command(0xC4, val)
+
+    def log_serial(self, msg):
+        self.txt_serial_log.append(msg)
+        # Auto scroll
+        sb = self.txt_serial_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def on_serial_frame(self, data):
+        # Parse data dict
+        cmd_id = data.get('cmd_id', 0) # Byte 11
+        res_code = data.get('res_val', 0) # Byte 12 - 15
+        temp = data.get('temp', 0.0)
+        volt = data.get('volt', 0.0)
+        
+        # Log
+        if cmd_id != 0x00:
+            self.log_serial(f"RX: Cmd={cmd_id:02X} Res={res_code:02X} Temp={temp:.1f}K Volt={volt:.1f}V")
+        
+        # Update Receive UI
+        if hasattr(self, 'lbl_recv_cmd_type'):
+            if cmd_id != 0x00:
+                self.lbl_recv_cmd_type.setText(f"0x{cmd_id:02X}")
+                
+                # Interpret Result
+                res_str = f"0x{res_code:02X}"
+                
+                if cmd_id == 0xC1:
+                    # ID: res_code(X4), val2(X5), val3(X6)
+                    x4 = res_code
+                    x5 = data.get('val2', 0)
+                    x6 = data.get('val3', 0)
+                    res_str = f"{x4+2000}_{x5}_{x6}"
+                    # Update ID Label in C1 row as well
+                    if hasattr(self, 'lbl_id_result'):
+                        self.lbl_id_result.setText(res_str)
+                elif cmd_id == 0xC7 or cmd_id == 0xC8:
+                    # Bit flags
+                    status = []
+                    # Check D7 (0x80), D6 (0x40), D5 (0x20)
+                    # D7=1 Success, D6=1 In Progress, D5=1 Fail
+                    if res_code & 0x80: 
+                        status.append("Finished")
+                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: green;")
+                    elif res_code & 0x40: 
+                        status.append("Busy")
+                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: orange;")
+                    elif res_code & 0x20: 
+                        status.append("Fail")
+                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: red;")
+                    else: 
+                        status.append("Busy")
+                    res_str = ",".join(status)
+                else:
+                    # Standard 0x00=Success, 0x01=Fail
+                    if res_code == 0x00:
+                        res_str = "Success"
+                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: green;")
+                    elif res_code == 0x01:
+                        res_str = "Fail"
+                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: red;")
+                    else:
+                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: orange;")
+                
+                self.lbl_recv_result.setText(res_str)
+                
+            self.lbl_recv_temp.setText(f"{temp:.1f} K")
+            self.lbl_recv_volt.setText(f"{volt:.1f} V")
 
     def init_ui(self):
         # Load UI from file
         try:
-            uic.loadUi("ui/mainwindow.ui", self)
+            uic.loadUi(resource_path(os.path.join("ui", "mainwindow.ui")), self)
         except Exception as e:
             print(f"Error loading UI: {e}")
             return
 
         # Setup Splitter Sizes (70% - 30%)
-        self.splitter.setSizes([896, 384])
+        # Window width is 1800 in UI. 1800 * 0.7 = 1260, 1800 * 0.3 = 540
+        self.splitter.setSizes([1260, 540])
+        self.splitter.setStretchFactor(0, 7)
+        self.splitter.setStretchFactor(1, 3)
         
         # Init FPS Counters
         self.fps_int_last_time = time.time()

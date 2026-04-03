@@ -20,8 +20,8 @@ class DataParser:
         # Col 0: Range, Col 1: Intensity
         pixels = data_u16.reshape(-1, 2)
         
-        range_raw = pixels[:, 0]
-        intensity_raw = pixels[:, 1]
+        intensity_raw = pixels[:, 0]
+        range_raw = pixels[:, 1]
         
         # Scaling
         range_img = range_raw.reshape((IMG_HEIGHT, IMG_WIDTH)).astype(np.float32) / RANGE_SCALE_FACTOR

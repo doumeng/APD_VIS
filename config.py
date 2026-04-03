@@ -5,23 +5,18 @@
 import struct
 
 # Network
-DEFAULT_IP = "127.0.0.1"
-DEFAULT_PORT = 5005
+DEFAULT_IP = "0.0.0.0"
+DEFAULT_PORT = 10000
 
 # Data Protocol
 IMG_WIDTH = 128
 IMG_HEIGHT = 128
 PIXEL_COUNT = IMG_WIDTH * IMG_HEIGHT
 
-# Protocol: 
-# Each pixel: 2 bytes (Range) + 2 bytes (Intensity) = 4 bytes
+
 BYTES_PER_PIXEL = 4
 FRAME_PAYLOAD_SIZE = PIXEL_COUNT * BYTES_PER_PIXEL
-# Note: Max UDP payload is typically ~65507 bytes (IPv4).
-# 65536 bytes payload exceeds this limit.
-# The sender must be fragmenting or using Jumbo Frames, 
-# or splitting the frame into multiple packets at application layer.
-# For now, we assume we receive a full frame buffer (reassembled) or single packet if local loopback.
+
 
 # Protocol Constants (Confirmed)
 PACKET_HEADER = b'\x55\xaa'  # Little-endian or Big-endian? 0xAA55 usually means 0x55 then 0xAA if little-endian. Let's assume network order.
@@ -59,5 +54,5 @@ INTENSITY_MAX_VAL = 200    # Expected max intensity value
 
 # UI Defaults
 DEFAULT_INTENSITY_CMAP = None
-DEFAULT_RANGE_CMAP = 'viridis'
+DEFAULT_RANGE_CMAP = 'jet'
 DEFAULT_TOF_CMAP = 'plasma'

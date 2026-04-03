@@ -61,20 +61,16 @@ class UdpSimulator:
                     task_type = 0
                     
                 else: # ToF
-                    # Generate 2 frames of 128x128, each pixel uint16 in range [0, 8000]
-                    tof_frame_1 = np.random.randint(0, 8001, (IMG_HEIGHT, IMG_WIDTH), dtype=np.uint16)
-                    tof_frame_2 = np.random.randint(0, 8001, (IMG_HEIGHT, IMG_WIDTH), dtype=np.uint16)
-                    tof_frame_3 = np.random.randint(0, 8001, (IMG_HEIGHT, IMG_WIDTH), dtype=np.uint16)
-                    tof_frame_4 = np.random.randint(0, 8001, (IMG_HEIGHT, IMG_WIDTH), dtype=np.uint16)
-
-                    # Concatenate as one payload: frame1 + frame2 + frame3 + frame4
-                    # Total: 4 * 128 * 128 * 2 bytes = 65536 bytes
-                    tof_data = np.concatenate((tof_frame_1.ravel(), tof_frame_2.ravel(), tof_frame_3.ravel(), tof_frame_4.ravel()))
-                    payload_bytes = tof_data.astype('<u2').tobytes()
+                    # Generate 1 frame of 128x128, each pixel uint16 in range [0, 8000]
+                    # Total: 128 * 128 * 2 bytes = 32768 bytes
+                    tof_frame = np.random.randint(0, 8001, (IMG_HEIGHT, IMG_WIDTH), dtype=np.uint16)
+                    payload_bytes = tof_frame.astype('<u2').tobytes()
                     task_type = 1
 
                 # 2. Fragment and Send
-                for seq in range(FRAGMENTS_PER_FRAME):
+                total_fragments = len(payload_bytes) // FRAGMENT_SIZE
+                
+                for seq in range(total_fragments):
                     # Slice data
                     start_idx = seq * FRAGMENT_SIZE
                     end_idx = start_idx + FRAGMENT_SIZE

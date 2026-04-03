@@ -3,6 +3,7 @@ import os
 import struct
 from PyQt5.QtCore import QThread, pyqtSignal
 import scipy.ndimage
+import cv2
 
 class Reconstructor(QThread):
     sig_progress = pyqtSignal(int)
@@ -235,15 +236,42 @@ class Reconstructor(QThread):
                             reconstructed_int[x, y] = max_vals[x, y]
                             reconstructed_rng[x, y] = (16000 - 2 * mean_tof) * 0.15
                         else:
-                             reconstructed_int[x, y] = 0
-                             reconstructed_rng[x, y] = 0
+                            reconstructed_int[x, y] = 0
+                            reconstructed_rng[x, y] = 0
             
-            self.sig_finished.emit(reconstructed_int, reconstructed_rng)
+            # --- Post-Processing ---
+            # if self.params.get('post_process', True):
+            #     self.sig_progress.emit(90)
+            #     reconstructed_int = self._apply_post_process(reconstructed_int)
+            #     reconstructed_rng = self._apply_post_process(reconstructed_rng)
+
+            self.sig_finished.emit(np.rot90(reconstructed_int, -1), np.rot90(reconstructed_rng, -1))
             
         except Exception as e:
             self.sig_error.emit(str(e))
             import traceback
             traceback.print_exc()
+
+    def _apply_post_process(self, img):
+        # 1. Denoise (Median Blur)
+        # Using Median Filter to remove salt-and-pepper noise
+        img_denoised = cv2.medianBlur(img, 3)
+        
+        # 2. Completion (Dilation Filling)
+        # Identify invalid pixels (assume <= 0 is invalid/noise)
+        mask_invalid = (img_denoised <= 1e-3).astype(np.uint8)
+        
+        if np.sum(mask_invalid) > 0:
+            # Dilate the image to propagate valid neighbor values into holes
+            # Since background is 0, max-dilation will bring in positive neighbor values
+            kernel = np.ones((3, 3), np.uint8)
+            img_dilated = cv2.dilate(img_denoised, kernel, iterations=1)
+            
+            # Only fill the holes
+            img_out = np.where(mask_invalid == 1, img_dilated, img_denoised)
+            return img_out
+        else:
+            return img_denoised
 
     def stop(self):
         self.running = False

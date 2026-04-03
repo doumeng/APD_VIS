@@ -7,6 +7,9 @@
 - **Run Simulators**: 
   - Intensity/Range data: `python utils/start_intensity_simulator.py`
   - ToF data: `python utils/start_tof_simulator.py`
+  - *Note: Launch the main application and click "Connect" before starting simulators.*
+- **Other Scripts**:
+  - `test.py`: Utility script for parsing Excel files (not unit tests).
 
 ## High-Level Architecture
 
