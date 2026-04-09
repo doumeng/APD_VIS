@@ -9,7 +9,7 @@ import struct
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit, QSpinBox, QPushButton, QCheckBox, QGroupBox, QTabWidget, QSplitter, QFileDialog
 from PyQt5.QtGui import QDoubleValidator, QIcon
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer, QEvent
 from PyQt5 import uic
 import pyqtgraph as pg
 
@@ -33,8 +33,8 @@ def resource_path(relative_path):
 # Main Window
 # =============================================================================
 class MainWindow(QMainWindow):
-    sig_update_int_rng = pyqtSignal(object, object)
-    sig_update_tof = pyqtSignal(object)
+    sig_update_int_rng = pyqtSignal(object, object, object)
+    sig_update_tof = pyqtSignal(object, object)
 
     def __init__(self):
         super().__init__()
@@ -61,7 +61,7 @@ class MainWindow(QMainWindow):
         self.sig_update_tof.connect(self.update_display_tof)
         
         # Initialize Algorithm Settings Logic
-        # self.init_algo_settings()
+        self.init_algo_settings()
 
         # Playback Signals
         self.playback.sig_update_int_rng.connect(self.update_display_int_rng)
@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         self.status_timer.start(1000)
 
         # Initialize Serial Logic
+        self.last_cmd_name = "--"
         self.serial_worker = SerialWorker()
         self.init_serial_logic()
 
@@ -89,239 +90,7 @@ class MainWindow(QMainWindow):
             self.serial_worker.close_port()
         event.accept()
 
-    def init_serial_logic(self):
-        # connect worker signals
-        self.serial_worker.sig_received_frame.connect(self.on_serial_frame)
-        self.serial_worker.sig_log.connect(self.log_serial)
-        self.serial_worker.sig_status_update.connect(lambda msg: self.statusBar().showMessage(msg, 3000))
-        
-        # UI connections
-        self.btn_serial_open.clicked.connect(self.toggle_serial)
-        self.combo_port.showPopup = self.refresh_ports # Refresh on click
-        self.refresh_ports()
-        
-        # Commands
-        self.btn_cmd_read_id.clicked.connect(lambda: self.serial_worker.send_command(0xC1))
-        self.btn_cmd_cooler_on.clicked.connect(lambda: self.serial_worker.send_command(0xC2))
-        self.btn_cmd_cooler_off.clicked.connect(lambda: self.serial_worker.send_command(0xC9))
-        self.btn_cmd_apd_on.clicked.connect(lambda: self.serial_worker.send_command(0xC7))
-        self.btn_cmd_apd_off.clicked.connect(lambda: self.serial_worker.send_command(0xC8))
-        self.btn_cmd_apd_config.clicked.connect(self.send_apd_config_cmd)
-        
-        # Temp 0xC3
-        self.btn_cmd_set_temp.clicked.connect(self.send_temp_cmd)
-        
-        # Bias 0xCA
-        self.btn_cmd_set_bias.clicked.connect(self.send_bias_cmd)
-        
-        # Algo Config 0xC5
-        if hasattr(self, 'btn_cmd_algo_config'):
-             self.btn_cmd_algo_config.clicked.connect(self.send_algo_cmd)
-        
-        # Projectile 0xC6
-        if hasattr(self, 'btn_cmd_proj_info'):
-             self.btn_cmd_proj_info.clicked.connect(self.send_proj_cmd)
-             
-        # Initialize Validators for Manual Inputs
-        if hasattr(self, 'txt_set_temp'):
-            # Temp: 223 - 253, 1 decimal place? (0.1K)
-            val_temp = QDoubleValidator(223.0, 253.0, 1, self)
-            val_temp.setNotation(QDoubleValidator.StandardNotation)
-            self.txt_set_temp.setValidator(val_temp)
-            self.txt_set_temp.setPlaceholderText("223-253")
-            
-        if hasattr(self, 'txt_set_bias'):
-            # Bias: 10 - 63.5, 1 decimal place?
-            val_bias = QDoubleValidator(10.0, 63.5, 1, self)
-            val_bias.setNotation(QDoubleValidator.StandardNotation)
-            self.txt_set_bias.setValidator(val_bias)
-            self.txt_set_bias.setPlaceholderText("10-63.5")
-
-    def refresh_ports(self):
-        self.combo_port.clear()
-        ports = serial.tools.list_ports.comports()
-        for p in ports:
-            self.combo_port.addItem(f"{p.device}")
-        
-        # Restore default showPopup
-        # self.combo_port.showPopup = QtWidgets.QComboBox.showPopup(self.combo_port) # Tricky in Python
-
-    def toggle_serial(self):
-        if self.serial_worker.running:
-            self.serial_worker.close_port()
-            self.btn_serial_open.setText("打开串口")
-            self.btn_serial_open.setChecked(False)
-        else:
-            port = self.combo_port.currentText().split(' ')[0]
-            if not port:
-                return
-            
-            # Read baud from combo
-            try:
-                baud = int(self.combo_baud.currentText())
-            except ValueError:
-                baud = 115200 # Default fallback
-            
-            if self.serial_worker.open_port(port, baud):
-                self.btn_serial_open.setText("关闭串口")
-                self.btn_serial_open.setChecked(True)
-            else:
-                self.btn_serial_open.setChecked(False)
-
-    def send_temp_cmd(self):
-        # 0xC3, 12/13 bytes = temp * 10
-        # Validate Input (223K - 253K)
-        txt = self.txt_set_temp.text().strip()
-        try:
-            temp_k = float(txt)
-        except ValueError:
-            self.statusBar().showMessage("Error: Temperature must be a number", 3000)
-            return
-
-        if not (223 <= temp_k <= 253):
-            self.statusBar().showMessage("Error: Temperature must be between 223K and 253K", 3000)
-            return
-
-        val = int(temp_k * 10)
-        d_high = (val >> 8) & 0xFF
-        d_low = val & 0xFF
-        # Protocol Table 3-26 says: Low byte (12), High byte (13)
-        self.serial_worker.send_command(0xC3, d_low, d_high)
-        self.statusBar().showMessage(f"Sent Temp: {temp_k}K", 3000)
-
-    def send_bias_cmd(self):
-        # 0xCA, 12=Int, 13=Dec
-        # Validate Input (10V - 63.5V)
-        txt = self.txt_set_bias.text().strip()
-        try:
-            val = float(txt)
-        except ValueError:
-            self.statusBar().showMessage("Error: Voltage must be a number", 3000)
-            return
-
-        if not (10 <= val <= 67.5):
-            self.statusBar().showMessage("Error: Voltage must be between 10V and 67.5V", 3000)
-            return
-
-        v_int = int(val)
-        v_dec = int(round((val - v_int) * 10))
-        self.serial_worker.send_command(0xCA, v_int, v_dec)
-        self.statusBar().showMessage(f"Sent Bias: {val}V", 3000)
-
-    def send_algo_cmd(self):
-        # 0xC5
-        # 12 Low 4: Frames
-        # 12 High 4: Noise
-        # 13 Low 4: Step
-        # 13 High 4: Threshold
-        # 14: Kernel Size
-        f = self.sb_algo_frames.value() & 0x0F
-        n = self.sb_algo_noise.value() & 0x0F
-        s = self.sb_algo_step.value() & 0x0F
-        t = self.sb_algo_thresh.value() & 0x0F
-        k = self.sb_algo_kernel.value() & 0xFF
-        
-        b12 = (n << 4) | f
-        b13 = (t << 4) | s
-        self.serial_worker.send_command(0xC5, b12, b13, k)
-
-    def send_proj_cmd(self):
-        # 0xC6
-        # D0-15 Dist (12,13) - Low, High
-        # D0-15 Vel (14,15) - Low, High
-        dist = int(self.sb_proj_dist.value())
-        vel = int(self.sb_proj_vel.value())
-        
-        d_low = dist & 0xFF
-        d_high = (dist >> 8) & 0xFF
-        
-        v_low = vel & 0xFF
-        v_high = (vel >> 8) & 0xFF
-        
-        self.serial_worker.send_command(0xC6, d_low, d_high,  v_low, v_high)
-
-    def send_apd_config_cmd(self):
-        # 0xC4
-        # D0: Trig (1=Checked)
-        # D1: Test Point (1=Checked)
-        # D2: Test Mode (1=Checked)
-        val = 0
-        if self.chk_apd_trig.isChecked():
-            val |= (1 << 0)
-        if self.chk_apd_test_point.isChecked():
-            val |= (1 << 1)
-        if self.chk_apd_test_mode.isChecked():
-            val |= (1 << 2)
-            
-        self.serial_worker.send_command(0xC4, val)
-
-    def log_serial(self, msg):
-        self.txt_serial_log.append(msg)
-        # Auto scroll
-        sb = self.txt_serial_log.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
-    def on_serial_frame(self, data):
-        # Parse data dict
-        cmd_id = data.get('cmd_id', 0) # Byte 11
-        res_code = data.get('res_val', 0) # Byte 12 - 15
-        temp = data.get('temp', 0.0)
-        volt = data.get('volt', 0.0)
-        
-        # Log
-        if cmd_id != 0x00:
-            self.log_serial(f"RX: Cmd={cmd_id:02X} Res={res_code:02X} Temp={temp:.1f}K Volt={volt:.1f}V")
-        
-        # Update Receive UI
-        if hasattr(self, 'lbl_recv_cmd_type'):
-            if cmd_id != 0x00:
-                self.lbl_recv_cmd_type.setText(f"0x{cmd_id:02X}")
-                
-                # Interpret Result
-                res_str = f"0x{res_code:02X}"
-                
-                if cmd_id == 0xC1:
-                    # ID: res_code(X4), val2(X5), val3(X6)
-                    x4 = res_code
-                    x5 = data.get('val2', 0)
-                    x6 = data.get('val3', 0)
-                    res_str = f"{x4+2000}_{x5}_{x6}"
-                    # Update ID Label in C1 row as well
-                    if hasattr(self, 'lbl_id_result'):
-                        self.lbl_id_result.setText(res_str)
-                elif cmd_id == 0xC7 or cmd_id == 0xC8:
-                    # Bit flags
-                    status = []
-                    # Check D7 (0x80), D6 (0x40), D5 (0x20)
-                    # D7=1 Success, D6=1 In Progress, D5=1 Fail
-                    if res_code & 0x80: 
-                        status.append("Finished")
-                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: green;")
-                    elif res_code & 0x40: 
-                        status.append("Busy")
-                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: orange;")
-                    elif res_code & 0x20: 
-                        status.append("Fail")
-                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: red;")
-                    else: 
-                        status.append("Busy")
-                    res_str = ",".join(status)
-                else:
-                    # Standard 0x00=Success, 0x01=Fail
-                    if res_code == 0x00:
-                        res_str = "Success"
-                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: green;")
-                    elif res_code == 0x01:
-                        res_str = "Fail"
-                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: red;")
-                    else:
-                        self.lbl_recv_result.setStyleSheet("font-weight: bold; color: orange;")
-                
-                self.lbl_recv_result.setText(res_str)
-                
-            self.lbl_recv_temp.setText(f"{temp:.1f} K")
-            self.lbl_recv_volt.setText(f"{volt:.1f} V")
-
+    # ui初始化逻辑
     def init_ui(self):
         # Load UI from file
         try:
@@ -361,9 +130,6 @@ class MainWindow(QMainWindow):
         self.hist_int.setTitle("强度分布直方图")
         self.hist_rng.setTitle("距离分布直方图")
         self.hist_tof.setTitle("ToF 统计直方图")
-        
-        # --- Setup Reconstruction UI (Dynamic Layout) ---
-        self.setup_reconstruction_ui()
 
         # --- Connect Signals ---
         # Net
@@ -388,110 +154,7 @@ class MainWindow(QMainWindow):
         except AttributeError:
             print("Warning: Could not connect mouse click events (scene not ready?)")
 
-    def setup_reconstruction_ui(self):
-        # Organize Reconstruction Tab into 3 Groups
-        # Find the parent widget of reconstruction controls (likely a Tab or Widget)
-        # We assume they are in a layout. We will reparent them.
-        
-        parent_widget = self.btn_reconstruct.parent()
-        layout = parent_widget.layout()
-        
-        # If no layout, create one
-        if layout is None:
-            layout = QVBoxLayout(parent_widget)
-        
-        # Clear existing layout (but keep widgets alive)
-        # We can't easily clear layout without deleting widgets.
-        # Instead, we will create new GroupBoxes and move widgets into them.
-        
-        # 1. Data Settings Group
-        gb_data = QGroupBox("数据设置")
-        layout_data = QVBoxLayout()
-        gb_data.setLayout(layout_data)
-        
-        # Add Frame Count Input
-        lbl_frames = QLabel("重建帧数 (0=全部):")
-        self.sb_recon_frames = QSpinBox()
-        self.sb_recon_frames.setRange(0, 100000)
-        self.sb_recon_frames.setValue(0)
-        
-        layout_data.addWidget(lbl_frames)
-        layout_data.addWidget(self.sb_recon_frames)
-        
-        # 2. Spatial Filter Group
-        gb_spatial = QGroupBox("空间滤波")
-        layout_spatial = QVBoxLayout()
-        gb_spatial.setLayout(layout_spatial)
-        
-        # Move existing widgets
-        # We remove them from their old layout first if possible, or just add them to new layout (automatically reparents)
-        layout_spatial.addWidget(self.chk_spatial_corr)
-        layout_spatial.addWidget(QLabel("邻域大小:"))
-        layout_spatial.addWidget(self.sb_spatial_kernel)
-        
-        # 3. Algorithm Config Group
-        gb_algo = QGroupBox("重建算法配置")
-        layout_algo = QVBoxLayout()
-        gb_algo.setLayout(layout_algo)
-        
-        layout_algo.addWidget(self.rb_offline_peak)
-        layout_algo.addWidget(self.rb_offline_matched)
-        
-        # Horizontal layout for Matched Filter params
-        h_matched = QHBoxLayout()
-        h_matched.addWidget(QLabel("脉宽:"))
-        h_matched.addWidget(self.sb_matched_width)
-        layout_algo.addLayout(h_matched)
-        
-        layout_algo.addWidget(self.rb_offline_derivative)
-        
-        # Horizontal layout for Derivative params
-        h_deriv = QHBoxLayout()
-        h_deriv.addWidget(QLabel("步长:"))
-        h_deriv.addWidget(self.sb_deriv_step)
-        h_deriv.addWidget(QLabel("阈值:"))
-        h_deriv.addWidget(self.sb_deriv_thresh)
-        layout_algo.addLayout(h_deriv)
-        
-        # 4. Rebuild Main Layout
-        # We need to insert these groups into the parent layout
-        # Since we can't easily replace the exact position in a loaded UI, 
-        # we might append them or try to replace the content of the tab.
-        
-        # Simplest approach: Create a new layout for the tab, add groups, add button.
-        # But we need to remove old items first to avoid duplication/mess.
-        
-        # Let's try to identify the layout items and remove them.
-        # Or just hide the old container if it exists?
-        
-        # Alternative: The existing UI likely has a Vertical Layout.
-        # We can just add our new Groups to it? No, duplicates.
-        
-        # Correct approach:
-        # Reparent the widgets. The old layout will lose them.
-        # Then add groups to the layout.
-        
-        # Let's clean the layout
-        while layout.count():
-            item = layout.takeAt(0)
-            w = item.widget()
-            if w and w not in [self.btn_reconstruct, self.chk_spatial_corr, self.sb_spatial_kernel, 
-                               self.rb_offline_peak, self.rb_offline_matched, self.sb_matched_width,
-                               self.rb_offline_derivative, self.sb_deriv_step, self.sb_deriv_thresh,
-                               self.progress_reconstruct]:
-                w.deleteLater() # Delete labels/spacers we don't track
-        
-        # Add Groups
-        layout.addWidget(gb_data)
-        layout.addWidget(gb_spatial)
-        layout.addWidget(gb_algo)
-        
-        # Add Reconstruct Button at the bottom
-        layout.addWidget(self.btn_reconstruct)
-        layout.addWidget(self.progress_reconstruct)
-        layout.addStretch()
-
-
+    # 算法设置UI初始化和更新逻辑
     def init_algo_settings(self):
         # Initial UI State based on processor defaults
         self.chk_dbscan.setChecked(self.processor.settings['dbscan_enabled'])
@@ -563,6 +226,7 @@ class MainWindow(QMainWindow):
         if not self.receiving and not self.playback.file_handle:
             self.update_offline_display()
 
+    # pyqtgraph窗口初始化逻辑
     def setup_image_view(self, glw, sb_min, sb_max, cmap_name=None):
         # glw is GraphicsLayoutWidget
         vb = glw.addViewBox()
@@ -615,6 +279,7 @@ class MainWindow(QMainWindow):
         
         return img, txt_fps
 
+    # 点击图像显示对应像素值的处理逻辑
     def on_image_click(self, event, img_item, label):
         if img_item.image is None:
             return
@@ -630,6 +295,7 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_pixel_info.setText(f"【{label}】\n点击越界")
 
+    # 网络连接按钮处理逻辑
     def toggle_connect(self):
         if not self.receiving:
             # Stop playback if active
@@ -672,6 +338,13 @@ class MainWindow(QMainWindow):
                 self.btn_play.setText("播放/暂停")
                 self.btn_play.setEnabled(False)
 
+    def handle_int_rng(self, intensity, rng, task_id=None):
+        self.sig_update_int_rng.emit(intensity, rng, task_id)
+
+    def handle_tof(self, tof, task_id=None):
+        self.sig_update_tof.emit(tof, task_id)
+
+    # 录制按钮处理逻辑
     def load_playback_file(self):
         filename, _ = QFileDialog.getOpenFileName(self, "选择录制文件", "", "Binary Files (*.bin)")
         if filename:
@@ -687,6 +360,7 @@ class MainWindow(QMainWindow):
             else:
                 self.lbl_play_status.setText("加载失败")
 
+    # 推流/回放按钮处理逻辑（共用一个按钮）
     def toggle_playback_or_stream(self):
         # 1. UDP Stream Mode
         if self.receiving and self.receiver:
@@ -706,6 +380,7 @@ class MainWindow(QMainWindow):
                 self.playback.pause()
                 self.btn_play.setText("播放")
 
+    # 回放功能的 UI 更新和完成处理逻辑
     def update_playback_ui(self, current, total):
         self.lbl_play_status.setText(f"进度: {current}/{total}")
 
@@ -717,11 +392,13 @@ class MainWindow(QMainWindow):
     def update_img_levels(self, img, min_val, max_val):
         img.setLevels([min_val, max_val])
 
+    # 保存录制文件按钮处理逻辑
     def select_recording_path(self):
         directory = QFileDialog.getExistingDirectory(self, "选择保存文件夹", "")
         if directory:
             self.txt_rec_path.setText(directory)
 
+    # 录制按钮处理逻辑
     def toggle_record(self):
         if self.btn_rec.isChecked():
             # Get directory
@@ -751,12 +428,9 @@ class MainWindow(QMainWindow):
             mb = bytes_written / 1024 / 1024
             self.lbl_rec_status.setText(f"{status} ({mb:.1f} MB)")
 
-    def handle_int_rng(self, intensity, rng):
-        self.sig_update_int_rng.emit(intensity, rng)
 
-    def handle_tof(self, tof):
-        self.sig_update_tof.emit(tof)
 
+    # 重建按钮逻辑
     def start_reconstruction(self):
         # 1. Stop any active stream/playback
         if self.receiving:
@@ -805,8 +479,9 @@ class MainWindow(QMainWindow):
         self.progress_reconstruct.setValue(0)
         self.reconstructor.run()
 
+    # 全局直方图更新逻辑
     def on_global_hist_update(self, x_axis, counts):
-        # Plot Global Histogram on ToF Histogram Widget
+        
         try:
             x_axis = np.asarray(x_axis)
             counts = np.asarray(counts)
@@ -829,8 +504,15 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error plotting global histogram: {e}")
 
+    # 重建过程中的进度更新、错误处理和完成处理
     def on_reconstruct_progress(self, val):
         self.progress_reconstruct.setValue(val)
+
+    def on_reconstruct_error(self, msg):
+        self.btn_reconstruct.setEnabled(True)
+        self.progress_reconstruct.setValue(0)
+        self.lbl_pixel_info.setText(f"重建错误: {msg}")
+        print(f"Reconstruction Error: {msg}")
 
     def on_reconstruct_finished(self, intensity, rng):
         self.btn_reconstruct.setEnabled(True)
@@ -860,15 +542,8 @@ class MainWindow(QMainWindow):
             self.img_rng.setImage(self.raw_recon_rng.T, autoLevels=False)
             self.lbl_pixel_info.setText("重建完成 (原始数据)")
 
-        
-    def on_reconstruct_error(self, msg):
-        self.btn_reconstruct.setEnabled(True)
-        self.progress_reconstruct.setValue(0)
-        self.lbl_pixel_info.setText(f"重建错误: {msg}")
-        print(f"Reconstruction Error: {msg}")
-
-    @pyqtSlot(object, object)
-    def update_display_int_rng(self, intensity, rng):
+    # 后处理完成后的显示更新（实时流和重建后处理共用）
+    def update_display_int_rng(self, intensity, rng, task_id=None):
         # Apply Post-Processing
         intensity, rng = self.processor.process(intensity, rng)
 
@@ -878,15 +553,18 @@ class MainWindow(QMainWindow):
         if dt > 0:
             fps = 1.0 / dt
             # Update both text items
-            self.txt_fps_int.setText(f"FPS: {fps:.1f}")
-            self.txt_fps_rng.setText(f"FPS: {fps:.1f}")
+            if task_id is not None:
+                self.txt_fps_int.setText(f"FPS: {fps:.1f} | TID: {task_id}")
+                self.txt_fps_rng.setText(f"FPS: {fps:.1f} | TID: {task_id}")
+            else:
+                self.txt_fps_int.setText(f"FPS: {fps:.1f}")
+                self.txt_fps_rng.setText(f"FPS: {fps:.1f}")
         self.fps_int_last_time = curr_time
 
         self.img_int.setImage(intensity.T, autoLevels=False)
         self.img_rng.setImage(rng.T, autoLevels=False)
         
         try:
-            # Downsample for faster histogram
             ds_int = intensity[::4, ::4]
             y, x = np.histogram(ds_int, bins=50)
             self.hist_int.plot(x, y, stepMode=True, fillLevel=0, brush=(0,0,255,150), clear=True)
@@ -896,15 +574,18 @@ class MainWindow(QMainWindow):
             self.hist_rng.plot(x, y, stepMode=True, fillLevel=0, brush=(0,255,0,150), clear=True)
         except:
             pass
-
-    @pyqtSlot(object)
-    def update_display_tof(self, tof):
+    
+    # ToF 图像更新
+    def update_display_tof(self, tof, task_id=None):
         # Update FPS
         curr_time = time.time()
         dt = curr_time - self.fps_tof_last_time
         if dt > 0:
             fps = 1.0 / dt
-            self.txt_fps_tof.setText(f"FPS: {fps:.1f}")
+            if task_id is not None:
+                self.txt_fps_tof.setText(f"FPS: {fps:.1f} | TID: {task_id}")
+            else:
+                self.txt_fps_tof.setText(f"FPS: {fps:.1f}")
         self.fps_tof_last_time = curr_time
 
         self.img_tof.setImage(tof.T, autoLevels=False)
@@ -914,20 +595,234 @@ class MainWindow(QMainWindow):
             self.hist_tof.plot(x, y, stepMode=True, fillLevel=0, brush=(255,0,0,150), clear=True)
         except:
             pass
+    
+    def handle_cmd(self, cmd_name, action_func=None):
+        self.last_cmd_name = cmd_name
+        if hasattr(self, 'lbl_recv_cmd_type'):
+            self.lbl_recv_cmd_type.setText(cmd_name)
+            self.lbl_recv_result.setStyleSheet("font-weight: bold; color: orange;")
+            self.lbl_recv_result.setText("等待响应...")
+        if action_func:
+            action_func()
+
+    # 串口通信相关的初始化和处理逻辑
+    def init_serial_logic(self):
+        # connect worker signals
+        self.serial_worker.sig_received_frame.connect(self.on_serial_frame)
+        self.serial_worker.sig_log.connect(self.log_serial)
+        self.serial_worker.sig_status_update.connect(lambda msg: self.statusBar().showMessage(msg, 3000))
+        
+        # UI connections
+        self.btn_serial_open.clicked.connect(self.toggle_serial)
+        self.combo_port.installEventFilter(self)
+        self.refresh_ports()
+        
+        # Commands
+        self.btn_cmd_cooler_on.clicked.connect(lambda: self.handle_cmd("制冷机上电", lambda: self.serial_worker.set_cooler_on(True)))
+        self.btn_cmd_cooler_off.clicked.connect(lambda: self.handle_cmd("制冷机下电", lambda: self.serial_worker.set_cooler_on(False)))
+        self.btn_cmd_apd_on.clicked.connect(lambda: self.handle_cmd("探测器上电", lambda: self.serial_worker.set_apd_on(True)))
+        self.btn_cmd_apd_off.clicked.connect(lambda: self.handle_cmd("探测器下电", lambda: self.serial_worker.set_apd_on(False)))
+        self.btn_cmd_apd_config.clicked.connect(lambda: self.handle_cmd("APD配置", self.send_apd_config_cmd))
+        
+        # Temp 0xC3
+        self.btn_cmd_set_temp.clicked.connect(lambda: self.handle_cmd("设置温度", self.send_temp_cmd))
+        
+        # Bias 0xCA
+        self.btn_cmd_set_bias.clicked.connect(lambda: self.handle_cmd("设置偏压", self.send_bias_cmd))
+        
+        # Algo Config 0xC5
+        if hasattr(self, 'btn_cmd_algo_config'):
+             self.btn_cmd_algo_config.clicked.connect(lambda: self.handle_cmd("算法配置", self.send_algo_cmd))
+        
+        # Projectile 0xC6
+        if hasattr(self, 'btn_cmd_proj_info'):
+             self.btn_cmd_proj_info.clicked.connect(lambda: self.handle_cmd("弹体信息", self.send_proj_cmd))
+             
+        # Initialize Validators for Manual Inputs
+        if hasattr(self, 'txt_set_temp'):
+            # Temp: 223 - 253, 1 decimal place? (0.1K)
+            val_temp = QDoubleValidator(223.0, 263.0, 1, self)
+            val_temp.setNotation(QDoubleValidator.StandardNotation)
+            self.txt_set_temp.setValidator(val_temp)
+            self.txt_set_temp.setPlaceholderText("223-263")
+            
+        if hasattr(self, 'txt_set_bias'):
+            # Bias: 10 - 63.5, 1 decimal place?
+            val_bias = QDoubleValidator(10.0, 71, 1, self)
+            val_bias.setNotation(QDoubleValidator.StandardNotation)
+            self.txt_set_bias.setValidator(val_bias)
+            self.txt_set_bias.setPlaceholderText("10-71")
+
+        if hasattr(self, 'grp_serial_log'):
+            if hasattr(self, 'btn_export_log'):
+                self.btn_export_log.clicked.connect(self.export_serial_log)
+
+    def export_serial_log(self):
+        log_text = self.txt_serial_log.toPlainText()
+        if not log_text:
+            self.statusBar().showMessage("日志为空", 3000)
+            return
+            
+        path, _ = QFileDialog.getSaveFileName(self, "导出串口日志", "serial_log.txt", "Text Files (*.txt);;All Files (*)")
+        
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(log_text)
+                self.statusBar().showMessage(f"日志已导出至: {path}", 3000)
+            except Exception as e:
+                self.statusBar().showMessage(f"日志导出失败: {e}", 3000)
+
+    def eventFilter(self, obj, event):
+        if obj == self.combo_port and event.type() == QEvent.MouseButtonPress:
+            self.refresh_ports()
+        return super().eventFilter(obj, event)
+
+    def refresh_ports(self):
+        current_port = self.combo_port.currentData()
+        self.combo_port.clear()
+        ports = serial.tools.list_ports.comports()
+        for p in ports:
+            desc = f"{p.device} - {p.description}" if p.description else p.device
+            self.combo_port.addItem(desc, userData=p.device)
+        
+        if current_port:
+            idx = self.combo_port.findData(current_port)
+            if idx >= 0:
+                self.combo_port.setCurrentIndex(idx)
+        
+    # 串口打开逻辑
+    def toggle_serial(self):
+        if self.serial_worker.running:
+            self.serial_worker.close_port()
+            self.btn_serial_open.setText("打开串口")
+            self.btn_serial_open.setChecked(False)
+        else:
+            port = self.combo_port.currentData()
+            if not port:
+                return
+            
+            try:
+                baud = int(self.combo_baud.currentText())
+            except ValueError:
+                baud = 115200 # Default fallback
+            
+            if self.serial_worker.open_port(port, baud):
+                self.btn_serial_open.setText("关闭串口")
+                self.btn_serial_open.setChecked(True)
+            else:
+                self.btn_serial_open.setChecked(False)
+
+    def send_temp_cmd(self):
+        txt = self.txt_set_temp.text().strip()
+        try:
+            temp_k = float(txt)
+        except ValueError:
+            self.statusBar().showMessage("Error: Temperature must be a number", 3000)
+            return
+
+        if not (223 <= temp_k <= 263):
+            self.statusBar().showMessage("Error: Temperature must be between 223K and 263K", 3000)
+            return
+
+        val = int(temp_k)
+        self.serial_worker.protocol.set_temp(val)
+        self.statusBar().showMessage(f"Sent Temp: {temp_k}K", 3000)
+
+    def send_bias_cmd(self):
+        txt = self.txt_set_bias.text().strip()
+        try:
+            val = float(txt)
+        except ValueError:
+            self.statusBar().showMessage("Error: Voltage must be a number", 3000)
+            return
+
+        if not (10 <= val <= 71):
+            self.statusBar().showMessage("Error: Voltage must be between 10V and 71V", 3000)
+            return
+
+        v_int = int(val)
+        v_dec = int(round((val - v_int) * 10))
+        self.serial_worker.protocol.set_bias(v_int, v_dec)
+        self.statusBar().showMessage(f"Sent Bias: {val}V", 3000)
+
+    def send_algo_cmd(self):
+        f = self.sb_algo_frames.value() & 0x0F
+        n = self.sb_algo_noise.value() & 0x0F
+        s = self.sb_algo_step.value() & 0x0F
+        t = self.sb_algo_thresh.value() & 0x0F
+        k = self.sb_algo_kernel.value() & 0xFF
+        
+        self.serial_worker.protocol.set_algo(f, n, s, t, k)
+        self.statusBar().showMessage("Sent Algo Config", 3000)
+
+    def send_proj_cmd(self):
+        dist = int(self.sb_proj_dist.value())
+        vel = int(self.sb_proj_vel.value())
+        
+        self.serial_worker.protocol.set_proj_info(dist, vel)
+        self.statusBar().showMessage(f"Sent Projectile Info: {dist}m, {vel}m/s", 3000)
+
+    def send_apd_config_cmd(self):
+        trig = self.chk_apd_trig.isChecked()
+        test_pt = self.chk_apd_test_point.isChecked()
+        test_mode = self.chk_apd_test_mode.isChecked()
+        self.serial_worker.protocol.set_apd_config(trig, test_pt, test_mode)
+        self.statusBar().showMessage("Sent APD Config", 3000)
+
+    def log_serial(self, msg):
+        self.txt_serial_log.append(msg)
+        # Auto scroll
+        sb = self.txt_serial_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def on_serial_frame(self, data):
+        # Parse data dict
+        version = data.get('version', '')
+        temp = data.get('temp', 0)
+        volt = data.get('volt', 0)
+
+        # Build status string for failures
+        failures = []
+        if data.get('test_status') == 1: failures.append("Test")
+        if data.get('apd_bias_status') == 1: failures.append("Bias")
+        if data.get('apd_ctrl_status') == 1: failures.append("APD_Ctrl")
+        if data.get('algo_status') == 1: failures.append("Algo")
+
+        # APD power: byte 12 (新逻辑: 1=成功, 0=失败)
+        power_st = data.get('power_status', 0)
+        # 低位: 制冷机, 高位: APD
+        if (power_st & 0x01) == 0: failures.append("Cooler 上电")
+        if (power_st & 0x02) == 0: failures.append("APD 上电")
+
+        status_msg = "Fail: " + ", ".join(failures) if failures else "All OK"
+
+        if hasattr(self, 'lbl_recv_cmd_type'):
+            self.lbl_recv_cmd_type.setText(getattr(self, 'last_cmd_name', '--'))
+
+            if failures:
+                res_str = "Fail"
+                self.lbl_recv_result.setStyleSheet("font-weight: bold; color: red;")
+            else:
+                res_str = "Success"
+                self.lbl_recv_result.setStyleSheet("font-weight: bold; color: green;")
+
+            self.lbl_recv_result.setText(res_str)
+
+            if hasattr(self, 'lbl_recv_temp'):
+                self.lbl_recv_temp.setText(f"{temp} K")
+            if hasattr(self, 'lbl_recv_volt'):
+                self.lbl_recv_volt.setText(f"{volt:.1f} V")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
-    # Apply Linux-style Dark Theme
     apply_dark_theme(app)
     
-    # PyQtGraph Global Config for consistency with Dark Theme
-    pg.setConfigOption('background', '#1e1e1e') # Darker than default 'k' (black) to match input fields? Or stick to black? 
-    # Black is best for scientific data usually. Let's use standard hex for consistent dark grey if desired, 
-    # but black (k) is standard for plots.
-    # Let's stick to 'k' but make foreground slightly off-white.
+    pg.setConfigOption('background', '#1e1e1e')
+
     pg.setConfigOption('background', 'k')
-    pg.setConfigOption('foreground', '#dcdcdc') # Matches our theme text color
+    pg.setConfigOption('foreground', '#dcdcdc') 
     
     w = MainWindow()
     w.show()

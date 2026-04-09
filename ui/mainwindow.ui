@@ -990,7 +990,7 @@
                <item row="2" column="1">
                 <widget class="QLineEdit" name="txt_set_temp">
                  <property name="placeholderText">
-                  <string>223-253 K</string>
+                  <string>223-263 K</string>
                  </property>
                 </widget>
                </item>
