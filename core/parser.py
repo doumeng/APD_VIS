@@ -37,12 +37,8 @@ class DataParser:
         """
         # 16384 * 2 bytes = 32768 bytes
         if len(raw_data) != 32768:
-            # Fallback or error handling
-            # Maybe it's still 65536 bytes (2 frames)? 
-            # Or maybe padded?
-            # Let's try to slice or pad if needed, but ideally it should match.
             pass
 
-        data_u16 = np.frombuffer(raw_data, dtype=np.uint16)[0:PIXEL_COUNT] # Take only the first 16384 values
+        data_u16 = np.frombuffer(raw_data, dtype="<H")[0:PIXEL_COUNT] # Take only the first 16384 values
         tof_img = data_u16.reshape((IMG_HEIGHT, IMG_WIDTH)).astype(np.float32)
         return tof_img
