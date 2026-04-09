@@ -137,10 +137,6 @@ class UdpReceiver(threading.Thread):
                         if task_type == config.TASK_TYPE_TOF:
                             self._dbg(f"tof reassembled: task={task_id}, fragments={expected}, bytes={len(full_data)}")
                         
-                        # Record Raw Data if enabled (even if paused, maybe? No, "pause push stream" usually means pause everything or just display.
-                        # User said "pause push stream", usually means pause receiving/displaying.
-                        # Let's assume pause means we don't process or display, but maybe we still buffer?
-                        # Or simpler: if paused, just don't callback.
                         
                         if self.paused:
                              # Cleanup and continue
@@ -157,11 +153,11 @@ class UdpReceiver(threading.Thread):
                         # Process
                         if task_type == 0: # Int + Rng
                             intensity, rng = DataParser.parse_intensity_range(full_data)
-                            self.callback_int_rng(intensity, rng)
+                            self.callback_int_rng(intensity, rng, task_id)
                             
                         elif task_type == 1: # ToF
                             tof = DataParser.parse_tof(full_data)
-                            self.callback_tof(tof)
+                            self.callback_tof(tof, task_id)
                             
                         # Cleanup
                         del self.fragments[task_id]

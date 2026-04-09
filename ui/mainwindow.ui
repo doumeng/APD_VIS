@@ -681,37 +681,54 @@
            </attribute>
            <layout class="QVBoxLayout" name="verticalLayout_offline">
             <item>
-             <widget class="QGroupBox" name="grp_offline_algo">
+             <widget class="QGroupBox" name="gb_data">
               <property name="title">
-               <string>重建算法 (Reconstruction)</string>
+               <string>数据设置</string>
               </property>
-              <layout class="QVBoxLayout" name="verticalLayout_4">
+              <layout class="QVBoxLayout" name="verticalLayout_gb_data">
                <item>
-                <layout class="QHBoxLayout" name="horizontalLayout_spatial">
+                <layout class="QHBoxLayout" name="horizontalLayout_gb_data">
                  <item>
-                  <widget class="QCheckBox" name="chk_spatial_corr">
+                  <widget class="QLabel" name="lbl_frames">
                    <property name="text">
-                    <string>空间相关 (Spatial Correlation)</string>
+                    <string>重建帧数 (0=全部):</string>
                    </property>
                   </widget>
                  </item>
                  <item>
-                  <spacer name="horizontalSpacer_spatial">
-                   <property name="orientation">
-                    <enum>Qt::Horizontal</enum>
+                  <widget class="QSpinBox" name="sb_recon_frames">
+                   <property name="maximum">
+                    <number>100000</number>
                    </property>
-                   <property name="sizeHint" stdset="0">
-                    <size>
-                     <width>20</width>
-                     <height>20</height>
-                    </size>
+                   <property name="value">
+                    <number>0</number>
                    </property>
-                  </spacer>
+                  </widget>
                  </item>
+                </layout>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="gb_spatial">
+              <property name="title">
+               <string>空间滤波</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_gb_spatial">
+               <item>
+                <widget class="QCheckBox" name="chk_spatial_corr">
+                 <property name="text">
+                  <string>空间相关 (Spatial Correlation)</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout" name="horizontalLayout_gb_spatial">
                  <item>
                   <widget class="QLabel" name="label_spatial_kernel">
                    <property name="text">
-                    <string>邻域 (Kernel):</string>
+                    <string>邻域大小:</string>
                    </property>
                   </widget>
                  </item>
@@ -730,6 +747,15 @@
                  </item>
                 </layout>
                </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="gb_algo">
+              <property name="title">
+               <string>重建算法配置</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_gb_algo">
                <item>
                 <widget class="QRadioButton" name="rb_offline_peak">
                  <property name="text">
@@ -748,24 +774,11 @@
                 </widget>
                </item>
                <item>
-                <layout class="QHBoxLayout" name="horizontalLayout_7">
-                 <item>
-                  <spacer name="horizontalSpacer_2">
-                   <property name="orientation">
-                    <enum>Qt::Horizontal</enum>
-                   </property>
-                   <property name="sizeHint" stdset="0">
-                    <size>
-                     <width>20</width>
-                     <height>20</height>
-                    </size>
-                   </property>
-                  </spacer>
-                 </item>
+                <layout class="QHBoxLayout" name="horizontalLayout_gb_algo_1">
                  <item>
                   <widget class="QLabel" name="label_8">
                    <property name="text">
-                    <string>激光脉宽 (Pulse Width):</string>
+                    <string>脉宽:</string>
                    </property>
                   </widget>
                  </item>
@@ -786,24 +799,11 @@
                 </widget>
                </item>
                <item>
-                <layout class="QHBoxLayout" name="horizontalLayout_8">
-                 <item>
-                  <spacer name="horizontalSpacer_3">
-                   <property name="orientation">
-                    <enum>Qt::Horizontal</enum>
-                   </property>
-                   <property name="sizeHint" stdset="0">
-                    <size>
-                     <width>20</width>
-                     <height>20</height>
-                    </size>
-                   </property>
-                  </spacer>
-                 </item>
+                <layout class="QHBoxLayout" name="horizontalLayout_gb_algo_2">
                  <item>
                   <widget class="QLabel" name="label_9">
                    <property name="text">
-                    <string>步长 (Step):</string>
+                    <string>步长:</string>
                    </property>
                   </widget>
                  </item>
@@ -817,7 +817,7 @@
                  <item>
                   <widget class="QLabel" name="label_10">
                    <property name="text">
-                    <string>阈值 (Threshold):</string>
+                    <string>阈值:</string>
                    </property>
                   </widget>
                  </item>
@@ -834,19 +834,19 @@
              </widget>
             </item>
             <item>
+             <widget class="QPushButton" name="btn_reconstruct">
+              <property name="text">
+               <string>开始离线重建</string>
+              </property>
+             </widget>
+            </item>
+            <item>
              <widget class="QProgressBar" name="progress_reconstruct">
               <property name="value">
                <number>0</number>
               </property>
               <property name="textVisible">
                <bool>true</bool>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QPushButton" name="btn_reconstruct">
-              <property name="text">
-               <string>开始离线重建</string>
               </property>
              </widget>
             </item>
@@ -962,7 +962,7 @@
                <item row="0" column="0">
                 <widget class="QPushButton" name="btn_cmd_read_id">
                  <property name="text">
-                  <string>读取组件编号 (0xC1)</string>
+                  <string>读取组件编号</string>
                  </property>
                 </widget>
                </item>
@@ -976,14 +976,14 @@
                <item row="1" column="0">
                 <widget class="QPushButton" name="btn_cmd_cooler_on">
                  <property name="text">
-                  <string>制冷机上电 (0xC2)</string>
+                  <string>制冷机上电</string>
                  </property>
                 </widget>
                </item>
                <item row="2" column="0">
                 <widget class="QPushButton" name="btn_cmd_set_temp">
                  <property name="text">
-                  <string>设置温度 (0xC3)</string>
+                  <string>设置温度</string>
                  </property>
                 </widget>
                </item>
@@ -997,7 +997,7 @@
                <item row="3" column="0">
                 <widget class="QPushButton" name="btn_cmd_apd_config">
                  <property name="text">
-                  <string>APD配置 (0xC4)</string>
+                  <string>APD配置</string>
                  </property>
                 </widget>
                </item>
@@ -1029,7 +1029,7 @@
                <item row="4" column="0">
                 <widget class="QPushButton" name="btn_cmd_algo_config">
                  <property name="text">
-                  <string>算法配置 (0xC5)</string>
+                  <string>算法配置</string>
                  </property>
                 </widget>
                </item>
@@ -1090,7 +1090,7 @@
                <item row="5" column="0">
                 <widget class="QPushButton" name="btn_cmd_proj_info">
                  <property name="text">
-                  <string>弹体信息 (0xC6)</string>
+                  <string>弹体信息</string>
                  </property>
                 </widget>
                </item>
@@ -1129,35 +1129,35 @@
                <item row="6" column="0">
                 <widget class="QPushButton" name="btn_cmd_apd_on">
                  <property name="text">
-                  <string>探测器上电 (0xC7)</string>
+                  <string>探测器上电</string>
                  </property>
                 </widget>
                </item>
                <item row="7" column="0">
                 <widget class="QPushButton" name="btn_cmd_apd_off">
                  <property name="text">
-                  <string>探测器下电 (0xC8)</string>
+                  <string>探测器下电</string>
                  </property>
                 </widget>
                </item>
                <item row="8" column="0">
                 <widget class="QPushButton" name="btn_cmd_cooler_off">
                  <property name="text">
-                  <string>制冷机下电 (0xC9)</string>
+                  <string>制冷机下电</string>
                  </property>
                 </widget>
                </item>
                <item row="9" column="0">
                 <widget class="QPushButton" name="btn_cmd_set_bias">
                  <property name="text">
-                  <string>设置偏压 (0xCA)</string>
+                  <string>设置偏压</string>
                  </property>
                 </widget>
                </item>
                <item row="9" column="1">
                 <widget class="QLineEdit" name="txt_set_bias">
                  <property name="placeholderText">
-                  <string>10-67.5 V</string>
+                  <string>10-71 V</string>
                  </property>
                 </widget>
                </item>
@@ -1245,6 +1245,13 @@
                 <widget class="QTextEdit" name="txt_serial_log">
                  <property name="readOnly">
                   <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QPushButton" name="btn_export_log">
+                 <property name="text">
+                  <string>导出日志</string>
                  </property>
                 </widget>
                </item>

@@ -70,14 +70,14 @@ class ImageProcessor:
             mask = (proc_rng < min_r) | (proc_rng > max_r)
             proc_rng[mask] = 0
             # Optional: Clear intensity where range is invalid?
-            # proc_int[mask] = 0 
+            proc_int[mask] = 0 
 
         # --- 2. Intensity Filter ---
         if self.settings['intensity_filter_enabled']:
             min_i = self.settings['min_intensity']
             mask = proc_int < min_i
             proc_rng[mask] = 0
-            # Keep intensity as is or zero it out?
+            proc_int[mask] = 0
             # Usually we filter Range based on Intensity confidence.
 
         # --- 3. DBSCAN Denoising (Open3D) ---

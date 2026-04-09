@@ -63,7 +63,7 @@ class UdpSimulator:
                 else: # ToF
                     # Generate 1 frame of 128x128, each pixel uint16 in range [0, 8000]
                     # Total: 128 * 128 * 2 bytes = 32768 bytes
-                    tof_frame = np.random.randint(0, 8001, (IMG_HEIGHT, IMG_WIDTH), dtype=np.uint16)
+                    tof_frame = np.random.randint(0, 8001, (IMG_HEIGHT, IMG_WIDTH, 2), dtype=np.uint16)
                     payload_bytes = tof_frame.astype('<u2').tobytes()
                     task_type = 1
 
