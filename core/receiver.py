@@ -55,7 +55,7 @@ class UdpReceiver(threading.Thread):
             
             while self.running:
                 try:
-                    self.sock.settimeout(1.0)
+                    self.sock.settimeout(0.0001)
                     data, addr = self.sock.recvfrom(65536) # Max UDP
                     self._dbg(f"pkt from {addr}, len={len(data)}")
                     
@@ -91,6 +91,12 @@ class UdpReceiver(threading.Thread):
                     
                     # Seq (8-9)
                     seq = data[8]
+                    
+                    # Servo status (9-13)
+                    pitch_raw = struct.unpack('<h', data[config.OFFSET_PITCH:config.OFFSET_PITCH+2])[0]
+                    yaw_raw = struct.unpack('<h', data[config.OFFSET_YAW:config.OFFSET_YAW+2])[0]
+                    pitch = pitch_raw / 100.0
+                    yaw = yaw_raw / 100.0
 
                     # Decide expected fragments when first fragment of task arrives
                     if self.fragment_counts[task_id] == 0:
@@ -128,6 +134,8 @@ class UdpReceiver(threading.Thread):
                     if seq not in self.fragments[task_id]:
                         self.fragments[task_id][seq] = payload
                         self.fragment_counts[task_id] += 1
+                        if seq == 0:
+                            self.fragments[task_id]['servo'] = (pitch, yaw)
                     elif task_type == config.TASK_TYPE_TOF:
                         self._dbg(f"duplicate tof fragment: task={task_id}, seq={seq}")
                     
@@ -151,13 +159,14 @@ class UdpReceiver(threading.Thread):
                             self.recorder.write_frame(full_data, task_type)
 
                         # Process
+                        servo = self.fragments[task_id].get('servo', (0.0, 0.0))
                         if task_type == 0: # Int + Rng
                             intensity, rng = DataParser.parse_intensity_range(full_data)
-                            self.callback_int_rng(intensity, rng, task_id)
+                            self.callback_int_rng(intensity, rng, task_id, servo[0], servo[1])
                             
                         elif task_type == 1: # ToF
                             tof = DataParser.parse_tof(full_data)
-                            self.callback_tof(tof, task_id)
+                            self.callback_tof(tof, task_id, servo[0], servo[1])
                             
                         # Cleanup
                         del self.fragments[task_id]

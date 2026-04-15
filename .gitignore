@@ -8,3 +8,6 @@ build/
 dist/
 *.spec
 *.log
+mcp-server/
+.github/
+doc/

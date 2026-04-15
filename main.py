@@ -33,8 +33,8 @@ def resource_path(relative_path):
 # Main Window
 # =============================================================================
 class MainWindow(QMainWindow):
-    sig_update_int_rng = pyqtSignal(object, object, object)
-    sig_update_tof = pyqtSignal(object, object)
+    sig_update_int_rng = pyqtSignal(object, object, object, float, float)
+    sig_update_tof = pyqtSignal(object, object, float, float)
 
     def __init__(self):
         super().__init__()
@@ -113,13 +113,13 @@ class MainWindow(QMainWindow):
         
         # --- Setup Graphics (PyQtGraph) ---
         # 1. Intensity Image
-        self.img_int, self.txt_fps_int = self.setup_image_view(self.glw_int, self.sb_int_min, self.sb_int_max, config.DEFAULT_INTENSITY_CMAP)
+        self.img_int, self.txt_fps_int, self.txt_servo_int = self.setup_image_view(self.glw_int, self.sb_int_min, self.sb_int_max, config.DEFAULT_INTENSITY_CMAP)
         
         # 2. Range Image
-        self.img_rng, self.txt_fps_rng = self.setup_image_view(self.glw_rng, self.sb_rng_min, self.sb_rng_max, config.DEFAULT_RANGE_CMAP)
+        self.img_rng, self.txt_fps_rng, self.txt_servo_rng = self.setup_image_view(self.glw_rng, self.sb_rng_min, self.sb_rng_max, config.DEFAULT_RANGE_CMAP)
         
         # 3. ToF Image
-        self.img_tof, self.txt_fps_tof = self.setup_image_view(self.glw_tof, self.sb_tof_min, self.sb_tof_max, config.DEFAULT_TOF_CMAP)
+        self.img_tof, self.txt_fps_tof, self.txt_servo_tof = self.setup_image_view(self.glw_tof, self.sb_tof_min, self.sb_tof_max, config.DEFAULT_TOF_CMAP)
         
         # 4. Histograms
         # plot_hist_int, plot_hist_rng, plot_hist_tof are promoted PlotWidgets
@@ -239,6 +239,12 @@ class MainWindow(QMainWindow):
         txt_fps.setPos(0, 0) # Top-left of the image (0,0)
         vb.addItem(txt_fps)
         
+        # Add Servo Text Item
+        txt_servo = pg.TextItem(text="Pitch: --, Yaw: --", color='y', anchor=(0, 0))
+        txt_servo.setPos(0, 15)
+        txt_servo.setZValue(10)
+        vb.addItem(txt_servo)
+        
         # Add Colorbar (HistogramLUTItem)
         hist = pg.HistogramLUTItem()
         hist.setImageItem(img)
@@ -277,7 +283,7 @@ class MainWindow(QMainWindow):
         # Apply initial levels from SpinBoxes
         img.setLevels([sb_min.value(), sb_max.value()])
         
-        return img, txt_fps
+        return img, txt_fps, txt_servo
 
     # 点击图像显示对应像素值的处理逻辑
     def on_image_click(self, event, img_item, label):
@@ -338,11 +344,11 @@ class MainWindow(QMainWindow):
                 self.btn_play.setText("播放/暂停")
                 self.btn_play.setEnabled(False)
 
-    def handle_int_rng(self, intensity, rng, task_id=None):
-        self.sig_update_int_rng.emit(intensity, rng, task_id)
+    def handle_int_rng(self, intensity, rng, task_id=None, pitch=0.0, yaw=0.0):
+        self.sig_update_int_rng.emit(intensity, rng, task_id, pitch, yaw)
 
-    def handle_tof(self, tof, task_id=None):
-        self.sig_update_tof.emit(tof, task_id)
+    def handle_tof(self, tof, task_id=None, pitch=0.0, yaw=0.0):
+        self.sig_update_tof.emit(tof, task_id, pitch, yaw)
 
     # 录制按钮处理逻辑
     def load_playback_file(self):
@@ -427,8 +433,6 @@ class MainWindow(QMainWindow):
         if self.recorder.recording:
             mb = bytes_written / 1024 / 1024
             self.lbl_rec_status.setText(f"{status} ({mb:.1f} MB)")
-
-
 
     # 重建按钮逻辑
     def start_reconstruction(self):
@@ -543,7 +547,7 @@ class MainWindow(QMainWindow):
             self.lbl_pixel_info.setText("重建完成 (原始数据)")
 
     # 后处理完成后的显示更新（实时流和重建后处理共用）
-    def update_display_int_rng(self, intensity, rng, task_id=None):
+    def update_display_int_rng(self, intensity, rng, task_id=None, pitch=0.0, yaw=0.0):
         # Apply Post-Processing
         intensity, rng = self.processor.process(intensity, rng)
 
@@ -560,6 +564,11 @@ class MainWindow(QMainWindow):
                 self.txt_fps_int.setText(f"FPS: {fps:.1f}")
                 self.txt_fps_rng.setText(f"FPS: {fps:.1f}")
         self.fps_int_last_time = curr_time
+        
+        # Update Servo
+        servo_text = f"Pitch: {pitch:.2f}, Yaw: {yaw:.2f}"
+        self.txt_servo_int.setText(servo_text)
+        self.txt_servo_rng.setText(servo_text)
 
         self.img_int.setImage(intensity.T, autoLevels=False)
         self.img_rng.setImage(rng.T, autoLevels=False)
@@ -576,7 +585,7 @@ class MainWindow(QMainWindow):
             pass
     
     # ToF 图像更新
-    def update_display_tof(self, tof, task_id=None):
+    def update_display_tof(self, tof, task_id=None, pitch=0.0, yaw=0.0):
         # Update FPS
         curr_time = time.time()
         dt = curr_time - self.fps_tof_last_time
@@ -587,6 +596,9 @@ class MainWindow(QMainWindow):
             else:
                 self.txt_fps_tof.setText(f"FPS: {fps:.1f}")
         self.fps_tof_last_time = curr_time
+        
+        # Update Servo
+        self.txt_servo_tof.setText(f"Pitch: {pitch:.2f}, Yaw: {yaw:.2f}")
 
         self.img_tof.setImage(tof.T, autoLevels=False)
         try:
@@ -784,16 +796,18 @@ class MainWindow(QMainWindow):
 
         # Build status string for failures
         failures = []
-        if data.get('test_status') == 1: failures.append("Test")
-        if data.get('apd_bias_status') == 1: failures.append("Bias")
-        if data.get('apd_ctrl_status') == 1: failures.append("APD_Ctrl")
-        if data.get('algo_status') == 1: failures.append("Algo")
+        last_cmd = getattr(self, 'last_cmd_name', '')
+        
+        if last_cmd == '算法配置' and data.get('algo_status') == 1: failures.append("Algo")
+        if last_cmd == '设置偏压' and data.get('apd_bias_status') == 1: failures.append("Bias")
+        if last_cmd == 'APD配置' and data.get('apd_ctrl_status') == 1: failures.append("APD_Ctrl")
+        if '测试' in last_cmd and data.get('test_status') == 1: failures.append("Test")
 
         # APD power: byte 12 (新逻辑: 1=成功, 0=失败)
         power_st = data.get('power_status', 0)
         # 低位: 制冷机, 高位: APD
-        if (power_st & 0x01) == 0: failures.append("Cooler 上电")
-        if (power_st & 0x02) == 0: failures.append("APD 上电")
+        if last_cmd in ["制冷机上电", "制冷机下电"] and (power_st & 0x01) == 0: failures.append("Cooler状态")
+        if last_cmd in ["探测器上电", "探测器下电"] and (power_st & 0x02) == 0: failures.append("APD状态")
 
         status_msg = "Fail: " + ", ".join(failures) if failures else "All OK"
 
@@ -813,6 +827,8 @@ class MainWindow(QMainWindow):
                 self.lbl_recv_temp.setText(f"{temp} K")
             if hasattr(self, 'lbl_recv_volt'):
                 self.lbl_recv_volt.setText(f"{volt:.1f} V")
+            if hasattr(self, 'lbl_id_result'):
+                self.lbl_id_result.setText(f"{version}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
