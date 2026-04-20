@@ -8,6 +8,8 @@ class DataRecorder(threading.Thread):
         super().__init__()
         self.save_dir = "." # Default to current directory
         self.file_handle = None
+        self.csv_handle = None
+        self.frame_index = 0
         self.current_type = None # 0: Depth, 1: ToF
         self.write_queue = queue.Queue()
         self.running = False
@@ -28,6 +30,8 @@ class DataRecorder(threading.Thread):
                 
                 # Reset state
                 self.file_handle = None
+                self.csv_handle = None
+                self.frame_index = 0
                 self.current_type = None
                 self.recording = True
                 self.bytes_written = 0
@@ -44,11 +48,15 @@ class DataRecorder(threading.Thread):
         prefix = "depth" if task_type == 0 else "tof"
         filename = f"{prefix}_{timestamp}.bin"
         filepath = os.path.join(self.save_dir, filename)
+        csv_filename = f"{prefix}_{timestamp}.csv"
+        csv_filepath = os.path.join(self.save_dir, csv_filename)
         
         try:
             self.file_handle = open(filepath, 'wb')
+            self.csv_handle = open(csv_filepath, 'w', encoding='utf-8')
+            self.csv_handle.write("frame_index,timestamp,pitch,yaw\n")
             self.current_type = task_type
-            print(f"Created recording file: {filepath}")
+            print(f"Created recording file: {filepath} and {csv_filepath}")
             return True
         except Exception as e:
             print(f"Failed to create file {filepath}: {e}")
@@ -65,13 +73,15 @@ class DataRecorder(threading.Thread):
             if self.file_handle:
                 self.file_handle.close()
                 self.file_handle = None
+                if self.csv_handle:
+                    self.csv_handle.close()
+                    self.csv_handle = None
                 self.current_type = None
             print("Recorder stopped.")
             
-    def write_frame(self, data, task_type):
+    def write_frame(self, data, task_type, servo=(0.0, 0.0)):
         if self.recording:
-            # We need to pass task_type to the queue so the writer knows which file to use
-            self.write_queue.put((data, task_type))
+            self.write_queue.put((data, task_type, servo))
 
     def run(self):
         self.running = True
@@ -79,7 +89,7 @@ class DataRecorder(threading.Thread):
             try:
                 # Get data with timeout
                 item = self.write_queue.get(timeout=0.5)
-                data, task_type = item
+                data, task_type, servo = item
                 
                 with self.lock:
                     # If file not created yet, create it based on first packet type
@@ -92,6 +102,9 @@ class DataRecorder(threading.Thread):
                         if task_type == self.current_type:
                             # Write Data only (No headers, no type byte)
                             self.file_handle.write(data)
+                            if self.csv_handle and not self.csv_handle.closed:
+                                self.csv_handle.write(f"{self.frame_index},{time.time()},{servo[0]},{servo[1]}\n")
+                                self.frame_index += 1
                             self.bytes_written += len(data)
                 
                 self.write_queue.task_done()
@@ -103,6 +116,8 @@ class DataRecorder(threading.Thread):
 
     def close(self):
         self.running = False
+        if self.csv_handle:
+            self.csv_handle.close()
         self.stop_recording()
         if self.file_handle:
             self.file_handle.close()

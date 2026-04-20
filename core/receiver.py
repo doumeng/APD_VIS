@@ -155,8 +155,9 @@ class UdpReceiver(threading.Thread):
 
                         # Record Raw Data if enabled
                         if self.recorder and self.recorder.recording:
+                            servo = self.fragments[task_id].get('servo', (0.0, 0.0))
                             # Pass data and type separately. Recorder will add type byte to file.
-                            self.recorder.write_frame(full_data, task_type)
+                            self.recorder.write_frame(full_data, task_type, servo)
 
                         # Process
                         servo = self.fragments[task_id].get('servo', (0.0, 0.0))
