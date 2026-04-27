@@ -130,7 +130,7 @@ class PlaybackManager(QObject):
         if self.data_type == 0: # Depth (Int + Rng)
             intensity, rng = DataParser.parse_intensity_range(data)
             # self.sig_update_int_rng.emit(intensity, rng)
-            self.sig_update_int_rng.emit(np.rot90(intensity, -1), np.rot90(rng, -1), None, pitch, yaw) # Rotate 90 degrees clockwise for correct orientation   
+            self.sig_update_int_rng.emit(intensity, rng, None, pitch, yaw) # Rotate 90 degrees clockwise for correct orientation   
         elif self.data_type == 1: # ToF
             tof = DataParser.parse_tof(data)
             self.sig_update_tof.emit(tof, None, pitch, yaw)

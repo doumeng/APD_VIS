@@ -55,7 +55,7 @@ class UdpReceiver(threading.Thread):
             
             while self.running:
                 try:
-                    self.sock.settimeout(0.0001)
+                    self.sock.settimeout(0.01)
                     data, addr = self.sock.recvfrom(65536) # Max UDP
                     self._dbg(f"pkt from {addr}, len={len(data)}")
                     

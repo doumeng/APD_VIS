@@ -231,6 +231,7 @@ class MainWindow(QMainWindow):
         # glw is GraphicsLayoutWidget
         vb = glw.addViewBox()
         vb.setAspectLocked(True)
+        vb.invertY(True)  # 将Y轴反转，使坐标原点在左上角
         img = pg.ImageItem()
         vb.addItem(img)
         
