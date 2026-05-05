@@ -1,6 +1,7 @@
 import socket
 import struct
 import threading
+import time
 import numpy as np
 from collections import defaultdict
 from core.parser import DataParser
@@ -24,6 +25,20 @@ class UdpReceiver(threading.Thread):
         self.fragments = defaultdict(dict)
         self.fragment_counts = defaultdict(int)
         self.expected_fragments = defaultdict(lambda: config.TOTAL_FRAGMENTS)
+        self.fragment_updated_at = {}
+        self.last_cleanup_time = 0.0
+        self.buffered_fragments = 0
+        self.stats = {
+            'packets_total': 0,
+            'packets_short': 0,
+            'checksum_ok': 0,
+            'checksum_fail': 0,
+            'checksum_drop': 0,
+            'bad_header': 0,
+            'bad_tail': 0,
+            'bad_seq': 0,
+            'bad_frag_len': 0,
+        }
 
     def _dbg(self, msg):
         if self.debug:
@@ -45,6 +60,12 @@ class UdpReceiver(threading.Thread):
         # If both plausible, prefer little-endian for compatibility with C++ direct struct send.
         return ctrl_le
 
+    def _xor_checksum(self, frame_bytes):
+        checksum = 0
+        for b in frame_bytes[0:config.OFFSET_FCS]:
+            checksum ^= b
+        return checksum & 0xFF
+
     def run(self):
         self.running = True
         try:
@@ -57,9 +78,14 @@ class UdpReceiver(threading.Thread):
                 try:
                     self.sock.settimeout(0.01)
                     data, addr = self.sock.recvfrom(65536) # Max UDP
+                    now = time.time()
                     self._dbg(f"pkt from {addr}, len={len(data)}")
+                    self.stats['packets_total'] += 1
+
+                    self._cleanup_fragments(now)
                     
                     if len(data) < config.PACKET_SIZE: # Too short
+                        self.stats['packets_short'] += 1
                         self._dbg(f"drop short packet: len={len(data)}")
                         continue
                         
@@ -72,6 +98,7 @@ class UdpReceiver(threading.Thread):
                         # Let's try both or just check hex.
                         # Let's assume standard network byte order first: b'\xaa\x55'
                         if data[0:2] != b'\xaa\x55':
+                            self.stats['bad_header'] += 1
                             self._dbg(f"drop bad header: {data[0:2].hex()}")
                             continue # Invalid header
 
@@ -111,6 +138,7 @@ class UdpReceiver(threading.Thread):
                     # Tail check: accept both byte orders
                     tail = data[-2:]
                     if tail not in (b'\x55\xAA', b'\xAA\x55'):
+                        self.stats['bad_tail'] += 1
                         if task_type == config.TASK_TYPE_TOF:
                             self._dbg(f"drop tof bad tail: task={task_id}, seq={seq}, tail={tail.hex()}")
                         continue
@@ -118,26 +146,40 @@ class UdpReceiver(threading.Thread):
                     expected = self.expected_fragments[task_id]
 
                     if seq >= expected:
+                        self.stats['bad_seq'] += 1
                         if task_type == config.TASK_TYPE_TOF:
                             self._dbg(f"drop tof bad seq: task={task_id}, seq={seq}, total={expected}")
                         continue
 
                     if frag_len == 0 or frag_len > config.DATA_LEN:
+                        self.stats['bad_frag_len'] += 1
                         if task_type == config.TASK_TYPE_TOF:
                             self._dbg(f"drop tof bad frag_len: task={task_id}, seq={seq}, frag_len={frag_len}")
                         continue
                     
                     # Checksum (4105)
-                    # TODO: Implement XOR Checksum validation
+                    recv_checksum = data[config.OFFSET_FCS]
+                    calc_checksum = self._xor_checksum(data)
+                    if recv_checksum != calc_checksum:
+                        self.stats['checksum_fail'] += 1
+                        self.stats['checksum_drop'] += 1
+                        self._dbg(
+                            f"drop bad checksum: task={task_id}, seq={seq}, recv=0x{recv_checksum:02x}, calc=0x{calc_checksum:02x}"
+                        )
+                        continue
+                    self.stats['checksum_ok'] += 1
                     
                     # Reassembly Logic
                     if seq not in self.fragments[task_id]:
                         self.fragments[task_id][seq] = payload
                         self.fragment_counts[task_id] += 1
+                        self.buffered_fragments += 1
+                        self.fragment_updated_at[task_id] = now
                         if seq == 0:
                             self.fragments[task_id]['servo'] = (pitch, yaw)
                     elif task_type == config.TASK_TYPE_TOF:
                         self._dbg(f"duplicate tof fragment: task={task_id}, seq={seq}")
+                        self.fragment_updated_at[task_id] = now
                     
                     if self.fragment_counts[task_id] == expected:
                         # Reassemble
@@ -148,9 +190,7 @@ class UdpReceiver(threading.Thread):
                         
                         if self.paused:
                              # Cleanup and continue
-                            del self.fragments[task_id]
-                            del self.fragment_counts[task_id]
-                            del self.expected_fragments[task_id]
+                            self._remove_task(task_id)
                             continue
 
                         # Record Raw Data if enabled
@@ -170,13 +210,10 @@ class UdpReceiver(threading.Thread):
                             self.callback_tof(tof, task_id, servo[0], servo[1])
                             
                         # Cleanup
-                        del self.fragments[task_id]
-                        del self.fragment_counts[task_id]
-                        del self.expected_fragments[task_id]
-                        
-                        # Cleanup old fragments (TODO: Implement timeout cleanup)
+                        self._remove_task(task_id)
 
                 except socket.timeout:
+                    self._cleanup_fragments(time.time())
                     continue
                 except Exception as e:
                     print(f"Receiver Error: {e}")
@@ -188,7 +225,54 @@ class UdpReceiver(threading.Thread):
             if self.sock:
                 self.sock.close()
 
+    def _remove_task(self, task_id):
+        frag_map = self.fragments.get(task_id)
+        if frag_map:
+            frag_cnt = 0
+            for k in frag_map.keys():
+                if isinstance(k, int):
+                    frag_cnt += 1
+            self.buffered_fragments = max(0, self.buffered_fragments - frag_cnt)
+        self.fragments.pop(task_id, None)
+        self.fragment_counts.pop(task_id, None)
+        self.expected_fragments.pop(task_id, None)
+        self.fragment_updated_at.pop(task_id, None)
+
+    def _cleanup_fragments(self, now):
+        interval = float(getattr(config, 'REASSEMBLY_CLEANUP_INTERVAL_SEC', 0.5))
+        if now - self.last_cleanup_time < interval:
+            return
+        self.last_cleanup_time = now
+
+        ttl = float(getattr(config, 'REASSEMBLY_TTL_SEC', 2.0))
+        max_tasks = int(getattr(config, 'REASSEMBLY_MAX_TASKS', 512))
+
+        stale_ids = [tid for tid, ts in self.fragment_updated_at.items() if now - ts > ttl]
+        for tid in stale_ids:
+            self._remove_task(tid)
+
+        if len(self.fragment_updated_at) > max_tasks:
+            overflow = len(self.fragment_updated_at) - max_tasks
+            oldest = sorted(self.fragment_updated_at.items(), key=lambda item: item[1])[:overflow]
+            for tid, _ in oldest:
+                self._remove_task(tid)
+
     def stop(self):
         self.running = False
         if self.sock:
             self.sock.close()
+
+    def get_fragment_stats(self):
+        return {
+            'active_tasks': len(self.fragment_updated_at),
+            'buffered_fragments': int(self.buffered_fragments),
+            'packets_total': int(self.stats['packets_total']),
+            'packets_short': int(self.stats['packets_short']),
+            'checksum_ok': int(self.stats['checksum_ok']),
+            'checksum_fail': int(self.stats['checksum_fail']),
+            'checksum_drop': int(self.stats['checksum_drop']),
+            'bad_header': int(self.stats['bad_header']),
+            'bad_tail': int(self.stats['bad_tail']),
+            'bad_seq': int(self.stats['bad_seq']),
+            'bad_frag_len': int(self.stats['bad_frag_len']),
+        }

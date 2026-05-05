@@ -200,7 +200,7 @@ class Reconstructor(QThread):
                 
                 # Rising edge criterion: Gate[k] - Gate[k-2], k in [2, num_gates-1]
                 # diff index i corresponds to gate k=i+2 in gate_counts.
-                diff =gate_counts[:, :, :-2] -gate_counts[:, :, 2:]
+                diff = gate_counts[:, :, :-2] -gate_counts[:, :, 2:]
                 
                 # 3. Find Max Rising Edge
                 max_vals = np.max(diff, axis=2)

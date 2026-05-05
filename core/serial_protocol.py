@@ -13,6 +13,10 @@ class SerialProtocol:
     def __init__(self):
         self.seq_num = 0
         self.payload_bytes = bytearray(20)
+
+    def reset_payload(self):
+        self.seq_num = 0
+        self.payload_bytes = bytearray(20)
         
     def set_bias(self, v_int, v_dec):
         self.payload_bytes[0] = v_int & 0xFF # 第8字节
@@ -119,12 +123,65 @@ class SerialWorker(QObject):
         self.protocol = SerialProtocol()
         self.running = False
         self.thread = None
+        self.current_port = ""
+        self.current_baud = 0
         
         self.cooler_on = False
         self.apd_on = False
+        self._log_fp = None
+        self._log_lock = threading.Lock()
+        self._log_stream_path = ""
 
     def get_protocol(self):
         return self.protocol
+
+    def _write_stream_line(self, msg):
+        if not self._log_fp:
+            return
+        line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n"
+        try:
+            with self._log_lock:
+                if self._log_fp:
+                    self._log_fp.write(line)
+                    self._log_fp.flush()
+        except Exception:
+            pass
+
+    def _emit_log(self, msg):
+        self.sig_log.emit(msg)
+        self._write_stream_line(msg)
+
+    def start_log_stream(self, path):
+        self.stop_log_stream()
+        with self._log_lock:
+            self._log_fp = open(path, "w", encoding="utf-8")
+            self._log_stream_path = path
+            self._log_fp.write(f"# 串口日志会话\n")
+            self._log_fp.write(f"# 开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            if self.current_port:
+                self._log_fp.write(f"# 端口: {self.current_port}\n")
+            if self.current_baud:
+                self._log_fp.write(f"# 波特率: {self.current_baud}\n")
+            self._log_fp.flush()
+        self._emit_log(f"日志流已启动: {path}")
+
+    def stop_log_stream(self):
+        with self._log_lock:
+            fp = self._log_fp
+            self._log_fp = None
+            self._log_stream_path = ""
+        if fp:
+            try:
+                fp.flush()
+                fp.close()
+            except Exception:
+                pass
+
+    def reset_command_state(self):
+        self.cooler_on = False
+        self.apd_on = False
+        self.protocol.reset_payload()
+        self.protocol.set_power(False, False)
 
     def open_port(self, port, baud=115200):
         if self.serial and self.serial.is_open:
@@ -132,36 +189,42 @@ class SerialWorker(QObject):
         
         try:
             self.serial = serial.Serial(port, baud, timeout=0.05)
+            self.current_port = str(port)
+            self.current_baud = int(baud)
             self.running = True
             self.thread = threading.Thread(target=self._worker_loop, daemon=True)
             self.thread.start()
-            self.sig_status_update.emit(f"Connected to {port}")
-            self.sig_log.emit(f"Open {port} @ {baud}")
+            self.sig_status_update.emit(f"已连接到 {port}")
+            self._emit_log(f"打开串口 {port} @ {baud}")
             return True
         except Exception as e:
-            self.sig_status_update.emit(f"Error: {e}")
-            self.sig_log.emit(f"Failed to open {port}: {e}")
+            self.sig_status_update.emit(f"错误: {e}")
+            self._emit_log(f"打开串口失败 {port}: {e}")
             return False
 
     def close_port(self):
         self.running = False
         if self.thread:
             self.thread.join(timeout=1.0)
+            self.thread = None
         
         if self.serial and self.serial.is_open:
             self.serial.close()
-            self.sig_status_update.emit("Disconnected")
-            self.sig_log.emit("Port Closed")
+            self.sig_status_update.emit("连接已断开")
+            self._emit_log("串口已关闭")
+        self.serial = None
+        self.stop_log_stream()
+        self.reset_command_state()
 
     def set_cooler_on(self, state):
         self.cooler_on = state
         self.protocol.set_power(self.cooler_on, self.apd_on)
-        self.sig_log.emit(f"TX state change: Cooler {'ON' if state else 'OFF'}")
+        self._emit_log(f"发送状态变更: 制冷机 {'开启' if state else '关闭'}")
         
     def set_apd_on(self, state):
         self.apd_on = state
         self.protocol.set_power(self.cooler_on, self.apd_on)
-        self.sig_log.emit(f"TX state change: APD {'ON' if state else 'OFF'}")
+        self._emit_log(f"发送状态变更: APD {'开启' if state else '关闭'}")
 
     def _worker_loop(self):
         buffer = bytearray()
@@ -173,7 +236,7 @@ class SerialWorker(QObject):
                 if now - last_send_time >= 0.2:
                     frame = self.protocol.get_periodic_frame()
                     self.serial.write(frame)
-                    self.sig_log.emit(f"TX: {frame.hex().upper()}") 
+                    self._emit_log(f"TX: {frame.hex().upper()}") 
                     last_send_time = now
 
                 if self.serial.in_waiting > 0:
@@ -184,22 +247,28 @@ class SerialWorker(QObject):
                     time.sleep(0.01)
                 
                 while len(buffer) >= 32:
-                    if buffer[0:4] == b'\xBA\xBA\xBA\xBA':
-                        if buffer[28:32] == b'\xBA\xBA\xBA\xBA':
-                            frame_data = buffer[:32]
-                            parsed = self.protocol.parse_response(frame_data)
-                            if parsed:
-                                self.sig_received_frame.emit(parsed)
-                                self.sig_log.emit(f"RX: {frame_data.hex().upper()}")
-                                buffer = buffer[32:]
-                                continue
-                            else:
-                                buffer = buffer[32:]
-                                continue
-                        else:
-                            buffer.pop(0)
-                    else:
-                        buffer.pop(0)
+                    start = buffer.find(b'\xBA\xBA\xBA\xBA')
+                    if start < 0:
+                        # Keep a short tail in case header spans chunks.
+                        del buffer[:-3]
+                        break
+
+                    if start > 0:
+                        del buffer[:start]
+
+                    if len(buffer) < 32:
+                        break
+
+                    if buffer[28:32] != b'\xBA\xBA\xBA\xBA':
+                        del buffer[0]
+                        continue
+
+                    frame_data = bytes(buffer[:32])
+                    parsed = self.protocol.parse_response(frame_data)
+                    del buffer[:32]
+                    if parsed:
+                        self.sig_received_frame.emit(parsed)
+                        self._emit_log(f"RX: {frame_data.hex().upper()}")
                         
             except Exception as e:
                 time.sleep(0.5)

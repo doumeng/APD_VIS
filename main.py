@@ -46,6 +46,24 @@ class MainWindow(QMainWindow):
         self.recorder = DataRecorder()
         self.playback = PlaybackManager()
         self.processor = ImageProcessor()
+        self._frame_lock = threading.Lock()
+        self._latest_int_rng = None
+        self._latest_tof = None
+        self._rx_int_frames = 0
+        self._rx_tof_frames = 0
+        self._ui_int_frames = 0
+        self._ui_tof_frames = 0
+        self._diag_last_ts = time.time()
+        self._diag_last_rx_int = 0
+        self._diag_last_rx_tof = 0
+        self._diag_last_ui_int = 0
+        self._diag_last_ui_tof = 0
+        self._bias_diag = {
+            'target': 0.0,
+            'send_time': 0.0,
+            'first_ack': 0.0,
+            'done_time': 0.0,
+        }
         
         # Store Raw Reconstructed Data for reprocessing
         self.raw_recon_int = None
@@ -74,12 +92,29 @@ class MainWindow(QMainWindow):
         self.status_timer.timeout.connect(self.update_status)
         self.status_timer.start(1000)
 
+        self.flush_timer = QTimer()
+        self.flush_timer.timeout.connect(self.flush_latest_frames)
+        self.flush_timer.setTimerType(Qt.PreciseTimer)
+        self.flush_timer.start(int(getattr(config, 'DISPLAY_FLUSH_INTERVAL_MS', 33)))
+
+        self.diag_timer = QTimer()
+        self.diag_timer.timeout.connect(self.update_runtime_diag)
+        self.diag_timer.start(max(200, int(float(getattr(config, 'DIAG_UPDATE_INTERVAL_SEC', 1.0)) * 1000)))
+
+        self.lbl_runtime_diag = QLabel("运行诊断: --")
+        self.statusBar().addPermanentWidget(self.lbl_runtime_diag)
+
         # Initialize Serial Logic
         self.last_cmd_name = "--"
+        self._serial_log_stream_path = ""
         self.serial_worker = SerialWorker()
         self.init_serial_logic()
 
     def closeEvent(self, event):
+        if hasattr(self, 'flush_timer'):
+            self.flush_timer.stop()
+        if hasattr(self, 'diag_timer'):
+            self.diag_timer.stop()
         if self.receiver:
             self.receiver.stop()
         if self.recorder:
@@ -108,6 +143,8 @@ class MainWindow(QMainWindow):
         # Init FPS Counters
         self.fps_int_last_time = time.time()
         self.fps_tof_last_time = time.time()
+        self.last_hist_update_int_rng = 0.0
+        self.last_hist_update_tof = 0.0
 
         # Access Widgets directly (they are now members of self)
         
@@ -346,10 +383,38 @@ class MainWindow(QMainWindow):
                 self.btn_play.setEnabled(False)
 
     def handle_int_rng(self, intensity, rng, task_id=None, pitch=0.0, yaw=0.0):
+        if self.receiving:
+            with self._frame_lock:
+                self._latest_int_rng = (intensity, rng, task_id, pitch, yaw)
+                self._rx_int_frames += 1
+            return
         self.sig_update_int_rng.emit(intensity, rng, task_id, pitch, yaw)
 
     def handle_tof(self, tof, task_id=None, pitch=0.0, yaw=0.0):
+        if self.receiving:
+            with self._frame_lock:
+                self._latest_tof = (tof, task_id, pitch, yaw)
+                self._rx_tof_frames += 1
+            return
         self.sig_update_tof.emit(tof, task_id, pitch, yaw)
+
+    def flush_latest_frames(self):
+        int_item = None
+        tof_item = None
+        with self._frame_lock:
+            if self._latest_int_rng is not None:
+                int_item = self._latest_int_rng
+                self._latest_int_rng = None
+            if self._latest_tof is not None:
+                tof_item = self._latest_tof
+                self._latest_tof = None
+
+        if int_item is not None:
+            self._ui_int_frames += 1
+            self.update_display_int_rng(*int_item)
+        if tof_item is not None:
+            self._ui_tof_frames += 1
+            self.update_display_tof(*tof_item)
 
     # 录制按钮处理逻辑
     def load_playback_file(self):
@@ -434,6 +499,67 @@ class MainWindow(QMainWindow):
         if self.recorder.recording:
             mb = bytes_written / 1024 / 1024
             self.lbl_rec_status.setText(f"{status} ({mb:.1f} MB)")
+
+    def update_runtime_diag(self):
+        now = time.time()
+        dt = max(1e-6, now - self._diag_last_ts)
+
+        with self._frame_lock:
+            rx_int = self._rx_int_frames
+            rx_tof = self._rx_tof_frames
+            ui_int = self._ui_int_frames
+            ui_tof = self._ui_tof_frames
+            pending_int = 1 if self._latest_int_rng is not None else 0
+            pending_tof = 1 if self._latest_tof is not None else 0
+
+        rx_int_fps = (rx_int - self._diag_last_rx_int) / dt
+        rx_tof_fps = (rx_tof - self._diag_last_rx_tof) / dt
+        ui_int_fps = (ui_int - self._diag_last_ui_int) / dt
+        ui_tof_fps = (ui_tof - self._diag_last_ui_tof) / dt
+
+        self._diag_last_ts = now
+        self._diag_last_rx_int = rx_int
+        self._diag_last_rx_tof = rx_tof
+        self._diag_last_ui_int = ui_int
+        self._diag_last_ui_tof = ui_tof
+
+        frag_tasks = 0
+        frag_buf = 0
+        if self.receiver:
+            try:
+                frag_stats = self.receiver.get_fragment_stats()
+                frag_tasks = int(frag_stats.get('active_tasks', 0))
+                frag_buf = int(frag_stats.get('buffered_fragments', 0))
+            except Exception:
+                pass
+
+        qsize = 0
+        dropped = 0
+        try:
+            rec_metrics = self.recorder.get_metrics()
+            qsize = int(rec_metrics.get('queue_size', 0))
+            dropped = int(rec_metrics.get('frames_dropped', 0))
+        except Exception:
+            pass
+
+        bias_text = "偏压时延(首应答/到位):--/-- ms"
+        if self._bias_diag['send_time'] > 0:
+            first_ms = "--"
+            done_ms = "--"
+            if self._bias_diag['first_ack'] > 0:
+                first_ms = f"{(self._bias_diag['first_ack'] - self._bias_diag['send_time']) * 1000:.0f}"
+            if self._bias_diag['done_time'] > 0:
+                done_ms = f"{(self._bias_diag['done_time'] - self._bias_diag['send_time']) * 1000:.0f}"
+            bias_text = f"偏压时延(首应答/到位):{first_ms}/{done_ms} ms"
+
+        self.lbl_runtime_diag.setText(
+            f"接收帧率(强/ToF):{rx_int_fps:.1f}/{rx_tof_fps:.1f} "
+            f"显示帧率(强/ToF):{ui_int_fps:.1f}/{ui_tof_fps:.1f} "
+            f"待处理(强/ToF):{pending_int}/{pending_tof} "
+            f"分片(任务/缓存):{frag_tasks}/{frag_buf} "
+            f"录制队列:{qsize} 丢帧:{dropped} "
+            f"{bias_text}"
+        )
 
     # 重建按钮逻辑
     def start_reconstruction(self):
@@ -574,16 +700,19 @@ class MainWindow(QMainWindow):
         self.img_int.setImage(intensity.T, autoLevels=False)
         self.img_rng.setImage(rng.T, autoLevels=False)
         
-        try:
-            ds_int = intensity[::4, ::4]
-            y, x = np.histogram(ds_int, bins=50)
-            self.hist_int.plot(x, y, stepMode=True, fillLevel=0, brush=(0,0,255,150), clear=True)
-            
-            ds_rng = rng[::4, ::4]
-            y, x = np.histogram(ds_rng, bins=50)
-            self.hist_rng.plot(x, y, stepMode=True, fillLevel=0, brush=(0,255,0,150), clear=True)
-        except:
-            pass
+        hist_interval = float(getattr(config, 'HIST_UPDATE_INTERVAL_SEC', 0.2))
+        if curr_time - self.last_hist_update_int_rng >= hist_interval:
+            self.last_hist_update_int_rng = curr_time
+            try:
+                ds_int = intensity[::4, ::4]
+                y, x = np.histogram(ds_int, bins=50)
+                self.hist_int.plot(x, y, stepMode=True, fillLevel=0, brush=(0,0,255,150), clear=True)
+                
+                ds_rng = rng[::4, ::4]
+                y, x = np.histogram(ds_rng, bins=50)
+                self.hist_rng.plot(x, y, stepMode=True, fillLevel=0, brush=(0,255,0,150), clear=True)
+            except:
+                pass
     
     # ToF 图像更新
     def update_display_tof(self, tof, task_id=None, pitch=0.0, yaw=0.0):
@@ -602,12 +731,15 @@ class MainWindow(QMainWindow):
         self.txt_servo_tof.setText(f"Pitch: {pitch:.2f}, Yaw: {yaw:.2f}")
 
         self.img_tof.setImage(tof.T, autoLevels=False)
-        try:
-            ds_tof = tof[::4, ::4]
-            y, x = np.histogram(ds_tof, bins=50)
-            self.hist_tof.plot(x, y, stepMode=True, fillLevel=0, brush=(255,0,0,150), clear=True)
-        except:
-            pass
+        hist_interval = float(getattr(config, 'HIST_UPDATE_INTERVAL_SEC', 0.2))
+        if curr_time - self.last_hist_update_tof >= hist_interval:
+            self.last_hist_update_tof = curr_time
+            try:
+                ds_tof = tof[::4, ::4]
+                y, x = np.histogram(ds_tof, bins=50)
+                self.hist_tof.plot(x, y, stepMode=True, fillLevel=0, brush=(255,0,0,150), clear=True)
+            except:
+                pass
     
     def handle_cmd(self, cmd_name, action_func=None):
         self.last_cmd_name = cmd_name
@@ -653,38 +785,81 @@ class MainWindow(QMainWindow):
              
         # Initialize Validators for Manual Inputs
         if hasattr(self, 'txt_set_temp'):
-            # Temp: 223 - 253, 1 decimal place? (0.1K)
+            # Temp: 223 - 263, 1 decimal place? (0.1K)
             val_temp = QDoubleValidator(223.0, 263.0, 1, self)
             val_temp.setNotation(QDoubleValidator.StandardNotation)
             self.txt_set_temp.setValidator(val_temp)
             self.txt_set_temp.setPlaceholderText("223-263")
             
         if hasattr(self, 'txt_set_bias'):
-            # Bias: 10 - 63.5, 1 decimal place?
-            val_bias = QDoubleValidator(10.0, 71, 1, self)
+            # Bias: 5 - 81, 1 decimal place?
+            val_bias = QDoubleValidator(5.0, 81, 1, self)
             val_bias.setNotation(QDoubleValidator.StandardNotation)
             self.txt_set_bias.setValidator(val_bias)
-            self.txt_set_bias.setPlaceholderText("10-71")
+            self.txt_set_bias.setPlaceholderText("5-81")
 
         if hasattr(self, 'grp_serial_log'):
+            try:
+                self.txt_serial_log.document().setMaximumBlockCount(int(getattr(config, 'SERIAL_LOG_MAX_BLOCKS', 2000)))
+            except Exception:
+                pass
             if hasattr(self, 'btn_export_log'):
                 self.btn_export_log.clicked.connect(self.export_serial_log)
 
     def export_serial_log(self):
-        log_text = self.txt_serial_log.toPlainText()
-        if not log_text:
-            self.statusBar().showMessage("日志为空", 3000)
+        directory = QFileDialog.getExistingDirectory(self, "选择日志保存目录", "")
+        if not directory:
             return
-            
-        path, _ = QFileDialog.getSaveFileName(self, "导出串口日志", "serial_log.txt", "Text Files (*.txt);;All Files (*)")
-        
-        if path:
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(log_text)
-                self.statusBar().showMessage(f"日志已导出至: {path}", 3000)
-            except Exception as e:
-                self.statusBar().showMessage(f"日志导出失败: {e}", 3000)
+
+        port = self.combo_port.currentData() if hasattr(self, 'combo_port') else None
+        port_name = str(port) if port else "SERIAL"
+        safe_port = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in port_name)
+        filename = f"{safe_port}_{time.strftime('%Y%m%d_%H%M%S')}.log"
+        path = os.path.join(directory, filename)
+
+        try:
+            self.serial_worker.start_log_stream(path)
+            self._serial_log_stream_path = path
+            self.statusBar().showMessage(f"已开始流式导出日志: {path}", 5000)
+        except Exception as e:
+            self.statusBar().showMessage(f"日志导出启动失败: {e}", 5000)
+
+    def reset_cmd_ui_inputs(self):
+        # 按需求在关闭串口后将发送命令相关输入恢复为0/默认。
+        if hasattr(self, 'txt_set_temp'):
+            self.txt_set_temp.setText("0")
+        if hasattr(self, 'txt_set_bias'):
+            self.txt_set_bias.setText("0")
+
+        if hasattr(self, 'chk_apd_trig'):
+            self.chk_apd_trig.setChecked(False)
+        if hasattr(self, 'chk_apd_test_point'):
+            self.chk_apd_test_point.setChecked(False)
+        if hasattr(self, 'chk_apd_test_mode'):
+            self.chk_apd_test_mode.setChecked(False)
+
+        if hasattr(self, 'sb_algo_frames'):
+            self.sb_algo_frames.setValue(0)
+        if hasattr(self, 'sb_algo_noise'):
+            self.sb_algo_noise.setValue(0)
+        if hasattr(self, 'sb_algo_step'):
+            self.sb_algo_step.setValue(0)
+        if hasattr(self, 'sb_algo_thresh'):
+            self.sb_algo_thresh.setValue(0)
+        if hasattr(self, 'sb_algo_kernel'):
+            self.sb_algo_kernel.setValue(0)
+
+        if hasattr(self, 'sb_proj_dist'):
+            self.sb_proj_dist.setValue(0)
+        if hasattr(self, 'sb_proj_vel'):
+            self.sb_proj_vel.setValue(0)
+
+        self.last_cmd_name = "--"
+        if hasattr(self, 'lbl_recv_cmd_type'):
+            self.lbl_recv_cmd_type.setText("--")
+        if hasattr(self, 'lbl_recv_result'):
+            self.lbl_recv_result.setStyleSheet("font-weight: bold; color: gray;")
+            self.lbl_recv_result.setText("--")
 
     def eventFilter(self, obj, event):
         if obj == self.combo_port and event.type() == QEvent.MouseButtonPress:
@@ -710,6 +885,7 @@ class MainWindow(QMainWindow):
             self.serial_worker.close_port()
             self.btn_serial_open.setText("打开串口")
             self.btn_serial_open.setChecked(False)
+            self.reset_cmd_ui_inputs()
         else:
             port = self.combo_port.currentData()
             if not port:
@@ -731,33 +907,39 @@ class MainWindow(QMainWindow):
         try:
             temp_k = float(txt)
         except ValueError:
-            self.statusBar().showMessage("Error: Temperature must be a number", 3000)
+            self.statusBar().showMessage("错误：温度必须是数字", 3000)
             return
 
         if not (223 <= temp_k <= 263):
-            self.statusBar().showMessage("Error: Temperature must be between 223K and 263K", 3000)
+            self.statusBar().showMessage("错误：温度必须在 223K 到 263K 之间", 3000)
             return
 
         val = int(temp_k)
         self.serial_worker.protocol.set_temp(val)
-        self.statusBar().showMessage(f"Sent Temp: {temp_k}K", 3000)
+        self.statusBar().showMessage(f"已发送温度：{temp_k}K", 3000)
 
     def send_bias_cmd(self):
         txt = self.txt_set_bias.text().strip()
         try:
             val = float(txt)
         except ValueError:
-            self.statusBar().showMessage("Error: Voltage must be a number", 3000)
+            self.statusBar().showMessage("错误：电压必须是数字", 3000)
             return
 
-        if not (10 <= val <= 71):
-            self.statusBar().showMessage("Error: Voltage must be between 10V and 71V", 3000)
+        if not (5 <= val <= 81):
+            self.statusBar().showMessage("错误：电压必须在 5V 到 81V 之间", 3000)
             return
+
+        # Bias latency diagnostics start point.
+        self._bias_diag['target'] = val
+        self._bias_diag['send_time'] = time.time()
+        self._bias_diag['first_ack'] = 0.0
+        self._bias_diag['done_time'] = 0.0
 
         v_int = int(val)
         v_dec = int(round((val - v_int) * 10))
         self.serial_worker.protocol.set_bias(v_int, v_dec)
-        self.statusBar().showMessage(f"Sent Bias: {val}V", 3000)
+        self.statusBar().showMessage(f"已发送偏压：{val}V", 3000)
 
     def send_algo_cmd(self):
         f = self.sb_algo_frames.value() & 0x0F
@@ -767,21 +949,21 @@ class MainWindow(QMainWindow):
         k = self.sb_algo_kernel.value() & 0xFF
         
         self.serial_worker.protocol.set_algo(f, n, s, t, k)
-        self.statusBar().showMessage("Sent Algo Config", 3000)
+        self.statusBar().showMessage("已发送算法配置", 3000)
 
     def send_proj_cmd(self):
         dist = int(self.sb_proj_dist.value())
         vel = int(self.sb_proj_vel.value())
         
         self.serial_worker.protocol.set_proj_info(dist, vel)
-        self.statusBar().showMessage(f"Sent Projectile Info: {dist}m, {vel}m/s", 3000)
+        self.statusBar().showMessage(f"已发送弹体信息：{dist}m, {vel}m/s", 3000)
 
     def send_apd_config_cmd(self):
         trig = self.chk_apd_trig.isChecked()
         test_pt = self.chk_apd_test_point.isChecked()
         test_mode = self.chk_apd_test_mode.isChecked()
         self.serial_worker.protocol.set_apd_config(trig, test_pt, test_mode)
-        self.statusBar().showMessage("Sent APD Config", 3000)
+        self.statusBar().showMessage("已发送 APD 配置", 3000)
 
     def log_serial(self, msg):
         self.txt_serial_log.append(msg)
@@ -795,31 +977,52 @@ class MainWindow(QMainWindow):
         temp = data.get('temp', 0)
         volt = data.get('volt', 0)
 
+        # Update bias response/settling diagnostics.
+        if self._bias_diag['send_time'] > 0:
+            now = time.time()
+            if self._bias_diag['first_ack'] == 0.0:
+                self._bias_diag['first_ack'] = now
+            if self._bias_diag['done_time'] == 0.0 and abs(float(volt) - float(self._bias_diag['target'])) <= 0.2:
+                self._bias_diag['done_time'] = now
+
         # Build status string for failures
         failures = []
         last_cmd = getattr(self, 'last_cmd_name', '')
         
-        if last_cmd == '算法配置' and data.get('algo_status') == 1: failures.append("Algo")
-        if last_cmd == '设置偏压' and data.get('apd_bias_status') == 1: failures.append("Bias")
-        if last_cmd == 'APD配置' and data.get('apd_ctrl_status') == 1: failures.append("APD_Ctrl")
-        if '测试' in last_cmd and data.get('test_status') == 1: failures.append("Test")
+        if last_cmd == '算法配置' and data.get('algo_status') == 1: failures.append("算法")
+        if last_cmd == '设置偏压' and data.get('apd_bias_status') == 1: failures.append("偏压")
+        if last_cmd == 'APD配置' and data.get('apd_ctrl_status') == 1: failures.append("APD控制")
+        if '测试' in last_cmd and data.get('test_status') == 1: failures.append("测试")
 
-        # APD power: byte 12 (新逻辑: 1=成功, 0=失败)
+        # 电源状态: byte 12，低位=制冷机，高位=探测器(APD)
         power_st = data.get('power_status', 0)
-        # 低位: 制冷机, 高位: APD
-        if last_cmd in ["制冷机上电", "制冷机下电"] and (power_st & 0x01) == 0: failures.append("Cooler状态")
-        if last_cmd in ["探测器上电", "探测器下电"] and (power_st & 0x02) == 0: failures.append("APD状态")
+        cooler_on = (power_st & 0x01) == 0
+        apd_on = (power_st & 0x02) == 0
+        cooler_state = "上电" if cooler_on else "下电"
+        apd_state = "上电" if apd_on else "下电"
+        is_power_cmd = last_cmd in ["制冷机上电", "制冷机下电", "探测器上电", "探测器下电"]
 
-        status_msg = "Fail: " + ", ".join(failures) if failures else "All OK"
+        status_msg = (
+            f"电源状态: 制冷机{cooler_state}, 探测器{apd_state}"
+            if is_power_cmd
+            else ("失败: " + ", ".join(failures) if failures else "全部正常")
+        )
 
         if hasattr(self, 'lbl_recv_cmd_type'):
             self.lbl_recv_cmd_type.setText(getattr(self, 'last_cmd_name', '--'))
 
-            if failures:
-                res_str = "Fail"
+            if is_power_cmd:
+                if last_cmd in ["制冷机上电", "制冷机下电"]:
+                    res_str = cooler_state
+                else:
+                    res_str = apd_state
+                color = "green" if res_str == "上电" else "gray"
+                self.lbl_recv_result.setStyleSheet(f"font-weight: bold; color: {color};")
+            elif failures:
+                res_str = "失败"
                 self.lbl_recv_result.setStyleSheet("font-weight: bold; color: red;")
             else:
-                res_str = "Success"
+                res_str = "成功"
                 self.lbl_recv_result.setStyleSheet("font-weight: bold; color: green;")
 
             self.lbl_recv_result.setText(res_str)

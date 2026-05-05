@@ -58,6 +58,15 @@ class ImageProcessor:
         if not self.settings['enabled']:
             return intensity, rng
 
+        # Fast path: processing enabled but no rule is active.
+        if (
+            not self.settings['range_gate_enabled']
+            and not self.settings['intensity_filter_enabled']
+            and not (self.settings['dbscan_enabled'] and HAS_OPEN3D)
+            and self.settings['completion_mode'] == 'none'
+        ):
+            return intensity, rng
+
         proc_int = intensity.copy()
         proc_rng = rng.copy()
 
