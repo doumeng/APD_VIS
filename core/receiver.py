@@ -8,13 +8,14 @@ from core.parser import DataParser
 import config
 
 class UdpReceiver(threading.Thread):
-    def __init__(self, ip, port, callback_int_rng, callback_tof, recorder=None):
+    def __init__(self, ip, port, callback_int_rng, callback_tof, recorder=None, data_format=None):
         super().__init__()
         self.ip = ip
         self.port = port
         self.callback_int_rng = callback_int_rng
         self.callback_tof = callback_tof
         self.recorder = recorder
+        self.data_format = data_format or getattr(config, 'DEFAULT_DATA_FORMAT', config.DATA_FORMAT_INFO_BOARD)
         self.running = False
         self.paused = False
         self.sock = None
@@ -43,6 +44,9 @@ class UdpReceiver(threading.Thread):
     def _dbg(self, msg):
         if self.debug:
             print(f"[ReceiverDebug] {msg}")
+
+    def set_data_format(self, data_format):
+        self.data_format = data_format or getattr(config, 'DEFAULT_DATA_FORMAT', config.DATA_FORMAT_INFO_BOARD)
 
     def _parse_ctrl(self, ctrl_bytes):
         ctrl_be = struct.unpack('>H', ctrl_bytes)[0]
@@ -202,7 +206,7 @@ class UdpReceiver(threading.Thread):
                         # Process
                         servo = self.fragments[task_id].get('servo', (0.0, 0.0))
                         if task_type == 0: # Int + Rng
-                            intensity, rng = DataParser.parse_intensity_range(full_data)
+                            intensity, rng = DataParser.parse_intensity_range(full_data, self.data_format)
                             self.callback_int_rng(intensity, rng, task_id, servo[0], servo[1])
                             
                         elif task_type == 1: # ToF

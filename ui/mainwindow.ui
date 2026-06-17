@@ -20,11 +20,14 @@
       <property name="orientation">
        <enum>Qt::Horizontal</enum>
       </property>
-      <widget class="QTabWidget" name="tabWidget_display">
-       <property name="currentIndex">
-        <number>0</number>
-       </property>
-       <widget class="QWidget" name="tab_int_rng">
+      <widget class="QWidget" name="widget_display_container">
+       <layout class="QVBoxLayout" name="verticalLayout_display_container">
+        <item>
+         <widget class="QTabWidget" name="tabWidget_display">
+          <property name="currentIndex">
+           <number>0</number>
+          </property>
+          <widget class="QWidget" name="tab_int_rng">
         <attribute name="title">
          <string>实时监控 (强度/距离)</string>
         </attribute>
@@ -233,6 +236,46 @@
          </item>
         </layout>
        </widget>
+       </widget>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="horizontalLayout_playback_slider">
+          <item>
+           <widget class="QLabel" name="label_playback_frame_title">
+            <property name="text">
+             <string>回放帧:</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QSlider" name="slider_playback_frame">
+            <property name="enabled">
+             <bool>false</bool>
+            </property>
+            <property name="orientation">
+             <enum>Qt::Horizontal</enum>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="lbl_playback_frame">
+            <property name="minimumSize">
+             <size>
+              <width>70</width>
+              <height>0</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>0/0</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+       </layout>
       </widget>
       <widget class="QWidget" name="widget_config_container">
        <layout class="QVBoxLayout" name="verticalLayout_config_container">
@@ -298,6 +341,39 @@
                 <widget class="QPushButton" name="btn_conn">
                  <property name="text">
                   <string>连接</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_data_format">
+              <property name="title">
+               <string>数据格式</string>
+              </property>
+              <layout class="QHBoxLayout" name="horizontalLayout_data_format">
+               <item>
+                <widget class="QLabel" name="label_data_format">
+                 <property name="text">
+                  <string>格式:</string>
+                 </property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QComboBox" name="combo_data_format">
+                 <item>
+                  <property name="text">
+                   <string>预处理数据</string>
+                  </property>
+                 </item>
+                 <item>
+                  <property name="text">
+                   <string>信息处理板数据</string>
+                  </property>
+                 </item>
+                 <property name="currentIndex">
+                  <number>1</number>
                  </property>
                 </widget>
                </item>
@@ -385,7 +461,27 @@
                    </property>
                   </widget>
                  </item>
+                 <item>
+                  <widget class="QPushButton" name="btn_scene_recon">
+                   <property name="enabled">
+                    <bool>false</bool>
+                   </property>
+                   <property name="text">
+                    <string>场景重建</string>
+                   </property>
+                  </widget>
+                 </item>
                 </layout>
+               </item>
+               <item>
+                <widget class="QProgressBar" name="progress_scene_recon">
+                 <property name="value">
+                  <number>0</number>
+                 </property>
+                 <property name="textVisible">
+                  <bool>true</bool>
+                 </property>
+                </widget>
                </item>
                <item>
                 <widget class="QLabel" name="lbl_play_status">
@@ -410,6 +506,22 @@
                  </property>
                  <property name="wordWrap">
                   <bool>true</bool>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="grp_export">
+              <property name="title">
+               <string>图像导出</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_export">
+               <item>
+                <widget class="QPushButton" name="btn_export_images">
+                 <property name="text">
+                  <string>导出当前图像</string>
                  </property>
                 </widget>
                </item>
@@ -660,6 +772,16 @@
               </property>
              </widget>
             </item>
+           <item>
+            <widget class="QCheckBox" name="chk_center_cross">
+             <property name="text">
+              <string>显示中心十字 (Intensity/Range)</string>
+             </property>
+             <property name="checked">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
             <item>
              <spacer name="verticalSpacer_2">
               <property name="orientation">
