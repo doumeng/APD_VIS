@@ -6,6 +6,7 @@ import csv
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 from core.parser import DataParser
 import numpy as np
+import config
 
 # Frame Sizes (in bytes)
 FRAME_SIZE_DEPTH = 65536  # 128x128 * 2 (Int) + 128x128 * 2 (Rng) = 65536
@@ -29,6 +30,10 @@ class PlaybackManager(QObject):
         self.paused = False
         self.frame_size = 0
         self.data_type = 0 # 0: Depth, 1: ToF
+        self.data_format = getattr(config, 'DEFAULT_DATA_FORMAT', config.DATA_FORMAT_INFO_BOARD)
+
+    def set_data_format(self, data_format):
+        self.data_format = data_format or getattr(config, 'DEFAULT_DATA_FORMAT', config.DATA_FORMAT_INFO_BOARD)
 
     def load_file(self, filename):
         if not os.path.exists(filename):
@@ -100,13 +105,16 @@ class PlaybackManager(QObject):
             self.file_handle.seek(0)
             self.current_frame = 0
             
-    def seek(self, frame_idx):
+    def seek(self, frame_idx, emit_frame=False):
         if not self.file_handle:
             return
         
         frame_idx = max(0, min(frame_idx, self.total_frames - 1))
         self.current_frame = frame_idx
         self.file_handle.seek(frame_idx * self.frame_size)
+        if emit_frame:
+            self.read_next_frame()
+            return
         self.sig_progress.emit(self.current_frame, self.total_frames)
 
     def read_next_frame(self):
@@ -128,7 +136,7 @@ class PlaybackManager(QObject):
 
         # Parse based on Type
         if self.data_type == 0: # Depth (Int + Rng)
-            intensity, rng = DataParser.parse_intensity_range(data)
+            intensity, rng = DataParser.parse_intensity_range(data, self.data_format)
             # self.sig_update_int_rng.emit(intensity, rng)
             self.sig_update_int_rng.emit(intensity, rng, None, pitch, yaw) # Rotate 90 degrees clockwise for correct orientation   
         elif self.data_type == 1: # ToF
@@ -142,3 +150,41 @@ class PlaybackManager(QObject):
         self.stop()
         if self.file_handle:
             self.file_handle.close()
+
+    def iter_depth_frames(self, servo_lag_frames=0):
+        if not self.filename:
+            raise ValueError("未加载回放文件")
+        if self.data_type != 0:
+            raise ValueError("当前文件不是强度/距离录制文件")
+
+        lag = int(servo_lag_frames)
+        csv_len = len(self.csv_data)
+        with open(self.filename, 'rb') as f:
+            for frame_idx in range(self.total_frames):
+                raw = f.read(self.frame_size)
+                if len(raw) < self.frame_size:
+                    break
+
+                intensity, rng = DataParser.parse_intensity_range(raw, self.data_format)
+                if frame_idx < csv_len:
+                    meta_idx = frame_idx + lag
+                    if meta_idx < 0:
+                        meta_idx = 0
+                    elif meta_idx >= csv_len:
+                        meta_idx = csv_len - 1
+
+                    meta = {
+                        'pitch': float(self.csv_data[meta_idx].get('pitch', 0.0)),
+                        'yaw': float(self.csv_data[meta_idx].get('yaw', 0.0)),
+                        'frame_index': frame_idx,
+                        'servo_meta_index': meta_idx,
+                    }
+                else:
+                    meta = {
+                        'pitch': 0.0,
+                        'yaw': 0.0,
+                        'frame_index': frame_idx,
+                        'servo_meta_index': frame_idx,
+                    }
+
+                yield intensity, rng, meta

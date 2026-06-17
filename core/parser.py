@@ -1,32 +1,36 @@
+'''
+Author: doumeng1026@gmail.com
+Date: 2026-04-27 10:30:14
+LastEditors: Do not edit
+LastEditTime: 2026-05-14 17:27:21
+Description:
+FilePath: \v3\core\parser.py
+'''
 import numpy as np
 import struct
 from config import *
 
 class DataParser:
     @staticmethod
-    def parse_intensity_range(raw_data):
+    def parse_intensity_range(raw_data, data_format=DATA_FORMAT_INFO_BOARD):
         """
         Parse raw bytes (65536 bytes) into Intensity and Range images.
-        Format: Interleaved [Range(uint16), Intensity(uint16)]
-        Range: First 2 bytes (Little/Big Endian? Assume Little for now)
-        Intensity: Next 2 bytes
+        info_board: [range uint16 block][intensity uint8 block]
+        preprocess: per-pixel interleaved [intensity uint16][range uint16]
         """
-        # Convert bytes to uint16 array
-        # assuming Little Endian (<H) based on typical embedded systems
-        # User didn't specify endianness, start with Little Endian (<)
-        data_u16 = np.frombuffer(raw_data, dtype=np.uint16)
-        
-        # Reshape to (Pixel Count, 2)
-        # Col 0: Range, Col 1: Intensity
-        pixels = data_u16.reshape(-1, 2)
-        
-        intensity_raw = pixels[:, 0]
-        range_raw = pixels[:, 1]
-        
-        # Scaling
+        if data_format == DATA_FORMAT_PREPROCESS:
+            data_u16 = np.frombuffer(raw_data, dtype=np.uint16)
+            pixels = data_u16[:PIXEL_COUNT * 2].reshape(-1, 2)
+            intensity_raw = pixels[:, 0]
+            range_raw = pixels[:, 1]
+        else:
+            half = len(raw_data) // 2
+            range_raw = np.frombuffer(raw_data[:half], dtype=np.uint16)[:PIXEL_COUNT]
+            intensity_raw = np.frombuffer(raw_data[half:], dtype=np.uint8)[:PIXEL_COUNT]
+
         range_img = range_raw.reshape((IMG_HEIGHT, IMG_WIDTH)).astype(np.float32) / RANGE_SCALE_FACTOR
         intensity_img = intensity_raw.reshape((IMG_HEIGHT, IMG_WIDTH)).astype(np.float32)
-        
+
         return intensity_img, range_img
 
     @staticmethod
